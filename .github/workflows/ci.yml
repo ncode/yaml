@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y kcov valgrind
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Format check
+        run: zig fmt --check build.zig build.zig.zon src tests tools
+
+      - name: Whitespace check
+        run: git diff --check
+
+      - name: Unit tests
+        run: zig build test-unit
+
+      - name: Structure checks
+        run: zig build test-structure
+
+      - name: Full test suite
+        run: zig build test
+
+      - name: Public conformance
+        run: zig build test-conformance
+
+      - name: Direct scanner/parser conformance
+        run: zig build test-direct-conformance
+
+      - name: Stress tests
+        run: zig build test-stress
+
+      - name: Allocation failure tests
+        run: zig build test-allocation
+
+      - name: Allocator leak checks
+        run: zig build test-leaks
+
+      - name: Coverage
+        run: zig build test-coverage
+
+      - name: Valgrind leak checks
+        run: zig build test-valgrind
+
+      - name: API docs
+        run: zig build docs
+
+      - name: Conformance report
+        run: zig build conformance-report
