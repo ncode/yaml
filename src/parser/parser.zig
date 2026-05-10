@@ -19,6 +19,8 @@ const common_limit = @import("../common/limit.zig");
 
 pub const Error = types.Error;
 pub const Event = types.Event;
+pub const EventBuilder = internal.EventBuilder;
+pub const EventStats = internal.EventStats;
 pub const EventStream = types.EventStream;
 pub const ParseError = types.ParseError;
 pub const max_block_depth: usize = common_limit.max_parse_collection_depth;
@@ -125,6 +127,11 @@ pub const DocumentRootClass = enum {
     flow_mapping,
 };
 
+pub const ParsedEventStream = struct {
+    stream: EventStream,
+    stats: EventStats,
+};
+
 pub fn classifyDocumentRoot(tokens: []const scanner.Token) DocumentRootClass {
     if (tokens.len < 2) return .fallback;
     if (tokens[0] != .stream_start or tokens[tokens.len - 1] != .stream_end) return .fallback;
@@ -155,6 +162,11 @@ pub fn classifyDocumentRoot(tokens: []const scanner.Token) DocumentRootClass {
 /// and flow collection roots, scalar and alias roots, directives, node
 /// properties, and comments. Unsupported token shapes return `Unsupported`.
 pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const scanner.Token) Error!EventStream {
+    const parsed = try parseTokensWithStats(allocator, tokens);
+    return parsed.stream;
+}
+
+pub fn parseTokensWithStats(allocator: std.mem.Allocator, tokens: []const scanner.Token) Error!ParsedEventStream {
     if (tokens.len < 2) return ParseError.InvalidSyntax;
     if (tokens[0] != .stream_start or tokens[tokens.len - 1] != .stream_end) return ParseError.InvalidSyntax;
     try validateAliasFlowCollectionSeparation(tokens);
@@ -172,7 +184,7 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const scanner.Token) 
     else
         ScalarDocumentTokens{ .scalar = null };
 
-    var events: std.ArrayList(Event) = .empty;
+    var events: EventBuilder = .{};
     try events.ensureTotalCapacity(arena_allocator, tokens.len);
 
     try events.append(arena_allocator, .stream_start);
@@ -417,7 +429,7 @@ fn shouldTryRootClass(actual: DocumentRootClass, expected: DocumentRootClass) bo
 fn appendSingleDocumentEvents(
     allocator: std.mem.Allocator,
     document_tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
 ) Error!bool {
     return document.appendSingleDocumentEvents(allocator, document_tokens, events, .{
         .parse_scalar_document = parseScalarDocumentTokens,
@@ -433,11 +445,29 @@ fn appendSingleDocumentEvents(
 fn finishEventStream(
     arena: *std.heap.ArenaAllocator,
     allocator: std.mem.Allocator,
-    events: *std.ArrayList(Event),
-) std.mem.Allocator.Error!EventStream {
+    events: *EventBuilder,
+) std.mem.Allocator.Error!ParsedEventStream {
+    const stats = events.stats;
     const owned_events = try events.toOwnedSlice(allocator);
     return .{
-        .arena = arena.*,
-        .events = owned_events,
+        .stream = .{
+            .arena = arena.*,
+            .events = owned_events,
+        },
+        .stats = stats,
     };
+}
+
+test "parseTokensWithStats reports private event stats" {
+    var token_stream = try scanner.scan(std.testing.allocator, "[ab, c]\n");
+    defer token_stream.deinit();
+
+    var parsed = try parseTokensWithStats(std.testing.allocator, token_stream.tokens);
+    defer parsed.stream.deinit();
+
+    try std.testing.expectEqual(parsed.stream.events.len, parsed.stats.event_count);
+    try std.testing.expectEqual(@as(usize, 2), parsed.stats.max_scalar_bytes);
+    try std.testing.expectEqual(@as(usize, 1), parsed.stats.max_nesting_depth);
+    try std.testing.expectEqual(@as(usize, 0), parsed.stats.current_nesting_depth);
+    try std.testing.expect(!parsed.stats.malformed_nesting);
 }

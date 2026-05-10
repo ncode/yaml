@@ -11,7 +11,10 @@ pub const scanner = impl.scanner;
 pub const types = impl.types;
 pub const Error = impl.Error;
 pub const Event = impl.Event;
+pub const EventBuilder = impl.EventBuilder;
+pub const EventStats = impl.EventStats;
 pub const EventStream = impl.EventStream;
+pub const ParsedEventStream = impl.ParsedEventStream;
 pub const ParseError = impl.ParseError;
 pub const max_block_depth = impl.max_block_depth;
 pub const NodeProperties = impl.NodeProperties;
@@ -106,6 +109,7 @@ pub const parsePlainBlockMappingDocumentTokens = impl.parsePlainBlockMappingDocu
 pub const parseNestedPlainBlockMappingNode = impl.parseNestedPlainBlockMappingNode;
 pub const classifyDocumentRoot = impl.classifyDocumentRoot;
 pub const parseTokens = impl.parseTokens;
+pub const parseTokensWithStats = impl.parseTokensWithStats;
 
 test {
     std.testing.refAllDecls(@This());

@@ -19,6 +19,88 @@ const scalarStartsAdjacentToPropertyIndicator = scalar_parser.scalarStartsAdjace
 const scalarTokenSpansLines = scalar_parser.scalarTokenSpansLines;
 const max_implicit_key_codepoints: usize = 1024;
 
+pub const EventStats = struct {
+    event_count: usize = 0,
+    max_scalar_bytes: usize = 0,
+    max_nesting_depth: usize = 0,
+    current_nesting_depth: usize = 0,
+    malformed_nesting: bool = false,
+
+    pub fn observe(self: *EventStats, event: Event) void {
+        self.event_count += 1;
+        switch (event) {
+            .scalar => |scalar| self.max_scalar_bytes = @max(self.max_scalar_bytes, scalar.value.len),
+            .sequence_start, .mapping_start => {
+                self.current_nesting_depth += 1;
+                self.max_nesting_depth = @max(self.max_nesting_depth, self.current_nesting_depth);
+            },
+            .sequence_end, .mapping_end => {
+                if (self.current_nesting_depth == 0) {
+                    self.malformed_nesting = true;
+                } else {
+                    self.current_nesting_depth -= 1;
+                }
+            },
+            else => {},
+        }
+    }
+
+    pub fn observeSlice(self: *EventStats, events: []const Event) void {
+        for (events) |event| self.observe(event);
+    }
+};
+
+pub const EventBuilder = struct {
+    list: std.ArrayList(Event) = .empty,
+    stats: EventStats = .{},
+
+    pub fn deinit(self: *EventBuilder, allocator: std.mem.Allocator) void {
+        self.list.deinit(allocator);
+        self.* = .{};
+    }
+
+    pub fn ensureTotalCapacity(self: *EventBuilder, allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!void {
+        try self.list.ensureTotalCapacity(allocator, capacity);
+    }
+
+    pub fn append(self: *EventBuilder, allocator: std.mem.Allocator, event: Event) std.mem.Allocator.Error!void {
+        try self.list.append(allocator, event);
+        self.stats.observe(event);
+    }
+
+    pub fn appendSlice(self: *EventBuilder, allocator: std.mem.Allocator, events: []const Event) std.mem.Allocator.Error!void {
+        try self.list.appendSlice(allocator, events);
+        self.stats.observeSlice(events);
+    }
+
+    pub fn toOwnedSlice(self: *EventBuilder, allocator: std.mem.Allocator) std.mem.Allocator.Error![]const Event {
+        return self.list.toOwnedSlice(allocator);
+    }
+
+    pub fn slice(self: *const EventBuilder) []const Event {
+        return self.list.items;
+    }
+};
+
+test "event builder tracks event stats while appending" {
+    var builder: EventBuilder = .{};
+    defer builder.deinit(std.testing.allocator);
+
+    try builder.append(std.testing.allocator, .stream_start);
+    try builder.append(std.testing.allocator, .{ .document_start = .{} });
+    try builder.append(std.testing.allocator, .{ .sequence_start = .{ .style = .flow } });
+    try builder.append(std.testing.allocator, .{ .mapping_start = .{ .style = .flow } });
+    try builder.append(std.testing.allocator, .{ .scalar = .{ .value = "abcd" } });
+    try builder.append(std.testing.allocator, .mapping_end);
+    try builder.append(std.testing.allocator, .sequence_end);
+
+    try std.testing.expectEqual(@as(usize, 7), builder.stats.event_count);
+    try std.testing.expectEqual(@as(usize, 4), builder.stats.max_scalar_bytes);
+    try std.testing.expectEqual(@as(usize, 2), builder.stats.max_nesting_depth);
+    try std.testing.expectEqual(@as(usize, 0), builder.stats.current_nesting_depth);
+    try std.testing.expect(!builder.stats.malformed_nesting);
+}
+
 pub const Line = struct {
     start: usize,
     end: usize,
@@ -516,7 +598,7 @@ pub fn isNodePropertyToken(token: scanner.Token) bool {
     return token == .anchor or token == .tag;
 }
 
-pub fn appendEvent(allocator: std.mem.Allocator, events: *std.ArrayList(Event), node: PlainBlockNode) Error!void {
+pub fn appendEvent(allocator: std.mem.Allocator, events: *EventBuilder, node: PlainBlockNode) Error!void {
     switch (node) {
         .scalar => |scalar| try events.append(allocator, .{ .scalar = scalar }),
         .alias => |alias| try events.append(allocator, .{ .alias = alias }),
@@ -564,7 +646,7 @@ pub fn parseFlowPlainBlockNode(
     directives: TokenDirectives,
 ) Error!?PlainBlockNode {
     const start = index.*;
-    var events: std.ArrayList(Event) = .empty;
+    var events: EventBuilder = .{};
     defer events.deinit(allocator);
     try events.ensureTotalCapacity(allocator, end - index.*);
 

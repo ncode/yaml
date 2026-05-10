@@ -303,6 +303,95 @@ test "parseEvents rejects nesting past parser depth budget" {
     try std.testing.expectError(ParseError.Unsupported, parseEvents(std.testing.allocator, input.items));
 }
 
+test "parseEventsWithOptions enforces parser limits at exact boundaries" {
+    const sequence_input = "- one\n- two\n";
+
+    var token_stream = try scanner.scan(std.testing.allocator, sequence_input);
+    defer token_stream.deinit();
+    var baseline = try parseEvents(std.testing.allocator, sequence_input);
+    defer baseline.deinit();
+
+    var event_boundary = try parseEventsWithOptions(std.testing.allocator, sequence_input, .{
+        .max_event_count = baseline.events.len,
+    });
+    defer event_boundary.deinit();
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, sequence_input, .{
+        .max_event_count = baseline.events.len - 1,
+    }));
+
+    var token_boundary = try parseEventsWithOptions(std.testing.allocator, sequence_input, .{
+        .max_token_count = token_stream.tokens.len,
+    });
+    defer token_boundary.deinit();
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, sequence_input, .{
+        .max_token_count = token_stream.tokens.len - 1,
+    }));
+
+    var scalar_boundary = try parseEventsWithOptions(std.testing.allocator, "abcd\n", .{
+        .max_scalar_bytes = 4,
+    });
+    defer scalar_boundary.deinit();
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, "abcd\n", .{
+        .max_scalar_bytes = 3,
+    }));
+
+    var nesting_boundary = try parseEventsWithOptions(std.testing.allocator, "[[value]]\n", .{
+        .max_nesting_depth = 2,
+    });
+    defer nesting_boundary.deinit();
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, "[[value]]\n", .{
+        .max_nesting_depth = 1,
+    }));
+}
+
+test "parseEventsWithOptions reports diagnostics for fused parser limit failures" {
+    const sequence_input = "- one\n- two\n";
+    var token_stream = try scanner.scan(std.testing.allocator, sequence_input);
+    defer token_stream.deinit();
+    var baseline = try parseEvents(std.testing.allocator, sequence_input);
+    defer baseline.deinit();
+
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, sequence_input, .{
+        .max_event_count = baseline.events.len - 1,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("event count exceeds configured limit", diagnostic.message);
+    try std.testing.expectEqual(sequence_input.len, diagnostic.offset);
+    try std.testing.expectEqual(@as(usize, 3), diagnostic.line);
+    try std.testing.expectEqual(@as(usize, 1), diagnostic.column);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, sequence_input, .{
+        .max_token_count = token_stream.tokens.len - 1,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("token count exceeds configured limit", diagnostic.message);
+    try std.testing.expectEqual(sequence_input.len, diagnostic.offset);
+    try std.testing.expectEqual(@as(usize, 3), diagnostic.line);
+    try std.testing.expectEqual(@as(usize, 1), diagnostic.column);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, "abcd\n", .{
+        .max_scalar_bytes = 3,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("scalar exceeds configured size limit", diagnostic.message);
+    try std.testing.expectEqual(@as(usize, 5), diagnostic.offset);
+    try std.testing.expectEqual(@as(usize, 2), diagnostic.line);
+    try std.testing.expectEqual(@as(usize, 1), diagnostic.column);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, parseEventsWithOptions(std.testing.allocator, "[[value]]\n", .{
+        .max_nesting_depth = 1,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("nesting depth exceeds configured limit", diagnostic.message);
+    try std.testing.expectEqual(@as(usize, 10), diagnostic.offset);
+    try std.testing.expectEqual(@as(usize, 2), diagnostic.line);
+    try std.testing.expectEqual(@as(usize, 1), diagnostic.column);
+}
+
 test "parseEventsWithOptions reports nesting depth diagnostic" {
     const depth = 300;
     var input: std.ArrayList(u8) = .empty;

@@ -376,7 +376,7 @@ test "parseTokens parses explicit document end comments" {
     try std.testing.expect(event_stream.events[4] == .stream_end);
 }
 
-fn rejectSingleDocument(_: std.mem.Allocator, _: []const scanner.Token, _: *std.ArrayList(parser.Event)) parser.Error!bool {
+fn rejectSingleDocument(_: std.mem.Allocator, _: []const scanner.Token, _: *parser.EventBuilder) parser.Error!bool {
     return false;
 }
 
@@ -390,7 +390,7 @@ test "parser helpers: explicit stream propagates unsupported document" {
         .stream_end,
     };
 
-    var events: std.ArrayList(parser.Event) = .empty;
+    var events: parser.EventBuilder = .{};
     defer events.deinit(std.testing.allocator);
 
     try std.testing.expectError(parser.ParseError.Unsupported, parser.appendExplicitDocumentStreamEvents(

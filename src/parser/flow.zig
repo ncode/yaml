@@ -15,6 +15,7 @@ const types = @import("event.zig");
 
 const Error = types.Error;
 const Event = types.Event;
+const EventBuilder = internal.EventBuilder;
 const ParseError = types.ParseError;
 const NodeProperties = internal.NodeProperties;
 const TokenDirectives = internal.TokenDirectives;
@@ -24,7 +25,7 @@ pub fn appendNodeEvents(
     tokens: []const scanner.Token,
     index: *usize,
     end: usize,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     depth: usize,
     directives: TokenDirectives,
 ) Error!bool {
@@ -40,7 +41,7 @@ fn appendNodeEventsWithOptions(
     tokens: []const scanner.Token,
     index: *usize,
     end: usize,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     depth: usize,
     directives: TokenDirectives,
     options: FlowNodeOptions,
@@ -105,7 +106,7 @@ pub fn appendSequenceNodeEvents(
     tokens: []const scanner.Token,
     index: *usize,
     end: usize,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     depth: usize,
     properties: NodeProperties,
     directives: TokenDirectives,
@@ -162,7 +163,7 @@ fn appendSequenceEntryEvents(
     tokens: []const scanner.Token,
     index: *usize,
     end: usize,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     depth: usize,
     directives: TokenDirectives,
 ) Error!bool {
@@ -188,7 +189,7 @@ fn appendSequenceEntryEvents(
         return true;
     }
 
-    var key_events: std.ArrayList(Event) = .empty;
+    var key_events: EventBuilder = .{};
     defer key_events.deinit(allocator);
     try key_events.ensureTotalCapacity(allocator, @min(end - index.*, 4));
 
@@ -200,14 +201,14 @@ fn appendSequenceEntryEvents(
     token_cursor.skipComments(tokens, index, end);
     if (token_cursor.flowMappingValueFollowsLineBreak(tokens, index.*, end)) return ParseError.InvalidSyntax;
     if (index.* >= end or tokens[index.*] != .flow_mapping_value) {
-        try events.appendSlice(allocator, key_events.items);
+        try events.appendSlice(allocator, key_events.slice());
         return true;
     }
 
     try implicit_key.validateImplicitTokenKeyLength(tokens, key_start, index.*);
     index.* += 1;
     try events.append(allocator, .{ .mapping_start = .{ .style = .flow } });
-    try events.appendSlice(allocator, key_events.items);
+    try events.appendSlice(allocator, key_events.slice());
 
     token_cursor.skipFlowInsignificant(tokens, index, end);
     if (token_cursor.isFlowSequenceEntryBoundary(tokens, index.*, end)) {
@@ -226,7 +227,7 @@ fn appendExplicitSequenceMappingEntryEvents(
     tokens: []const scanner.Token,
     index: *usize,
     end: usize,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     depth: usize,
     directives: TokenDirectives,
 ) Error!bool {
@@ -272,7 +273,7 @@ pub fn appendMappingNodeEvents(
     tokens: []const scanner.Token,
     index: *usize,
     end: usize,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     depth: usize,
     properties: NodeProperties,
     directives: TokenDirectives,
@@ -411,7 +412,7 @@ fn parseTokens(
     if (index < end and tokens[index] == .indent) index += 1;
     token_cursor.skipComments(tokens, &index, end);
 
-    var node_events: std.ArrayList(Event) = .empty;
+    var node_events: EventBuilder = .{};
     defer node_events.deinit(allocator);
     try node_events.ensureTotalCapacity(allocator, end - index);
     var properties = try internal.consumeTopLevelSeparated(allocator, tokens, &index, end, directives);
@@ -426,7 +427,7 @@ fn parseTokens(
     } else {
         if (index >= end or !tokenMatchesRoot(tokens[index], expected_root)) return null;
         if (!try appendNodeEvents(allocator, tokens, &index, end, &node_events, 0, directives)) return null;
-        if (!rootEventMatches(node_events.items, expected_root)) return null;
+        if (!rootEventMatches(node_events.slice(), expected_root)) return null;
     }
 
     token_cursor.skipComments(tokens, &index, end);
@@ -462,13 +463,13 @@ fn rootEventMatches(events: []const Event, expected: ExpectedRootEvent) bool {
     };
 }
 
-fn appendEmptyScalar(allocator: std.mem.Allocator, events: *std.ArrayList(Event)) Error!void {
+fn appendEmptyScalar(allocator: std.mem.Allocator, events: *EventBuilder) Error!void {
     try appendEmptyScalarWithProperties(allocator, events, null, null);
 }
 
 fn appendEmptyScalarWithProperties(
     allocator: std.mem.Allocator,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     anchor: ?[]const u8,
     tag: ?[]const u8,
 ) Error!void {

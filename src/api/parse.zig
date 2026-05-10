@@ -15,10 +15,16 @@ const scanner = @import("../scanner/scanner.zig");
 const parser_diagnostics = @import("../parser/diagnostics.zig");
 
 const Event = event_types.Event;
+const EventStats = token_parser.EventStats;
 const Error = diagnostics.Error;
 const EventStream = event_types.EventStream;
 const ParseError = diagnostics.ParseError;
 const ParseOptions = options_api.ParseOptions;
+
+const ParseResult = struct {
+    stream: EventStream,
+    stats: ?EventStats = null,
+};
 
 /// Owning event-stream parser facade.
 ///
@@ -70,7 +76,7 @@ pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, o
         }
     }
 
-    var stream = parseEventsInternal(allocator, input, options) catch |err| {
+    const result = parseEventsInternal(allocator, input, options) catch |err| {
         if (options.diagnostic) |diagnostic| {
             if (diagnostic.message.len == 0) {
                 diagnostic.* = parser_diagnostics.diagnosticForParseError(input, err);
@@ -78,9 +84,11 @@ pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, o
         }
         return err;
     };
+    var stream = result.stream;
 
     if (options.max_event_count) |max_event_count| {
-        if (stream.events.len > max_event_count) {
+        const event_count = if (result.stats) |stats| stats.event_count else stream.events.len;
+        if (event_count > max_event_count) {
             stream.deinit();
             if (options.diagnostic) |diagnostic| {
                 diagnostic.* = diagnosticAt(input, input.len, "event count exceeds configured limit");
@@ -90,7 +98,8 @@ pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, o
     }
 
     if (options.max_scalar_bytes) |max_scalar_bytes| {
-        if (hasScalarLongerThan(stream.events, max_scalar_bytes)) {
+        const scalar_too_long = if (result.stats) |stats| stats.max_scalar_bytes > max_scalar_bytes else hasScalarLongerThan(stream.events, max_scalar_bytes);
+        if (scalar_too_long) {
             stream.deinit();
             if (options.diagnostic) |diagnostic| {
                 diagnostic.* = diagnosticAt(input, input.len, "scalar exceeds configured size limit");
@@ -100,7 +109,11 @@ pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, o
     }
 
     const max_nesting_depth = options.max_nesting_depth orelse common_limit.default_parse_collection_depth;
-    if (hasNestingDeeperThan(stream.events, max_nesting_depth)) {
+    const nesting_too_deep = if (result.stats) |stats|
+        stats.malformed_nesting or stats.max_nesting_depth > max_nesting_depth
+    else
+        hasNestingDeeperThan(stream.events, max_nesting_depth);
+    if (nesting_too_deep) {
         stream.deinit();
         if (options.diagnostic) |diagnostic| {
             diagnostic.* = diagnosticAt(input, input.len, "nesting depth exceeds configured limit");
@@ -144,7 +157,7 @@ fn hasNestingDeeperThan(events: []const Event, max_nesting_depth: usize) bool {
     return false;
 }
 
-fn parseEventsInternal(allocator: std.mem.Allocator, input: []const u8, options: ParseOptions) Error!EventStream {
+fn parseEventsInternal(allocator: std.mem.Allocator, input: []const u8, options: ParseOptions) Error!ParseResult {
     var token_stream = try scanner.scan(allocator, input);
     defer token_stream.deinit();
 
@@ -157,7 +170,8 @@ fn parseEventsInternal(allocator: std.mem.Allocator, input: []const u8, options:
         }
     }
 
-    return token_parser.parseTokens(allocator, token_stream.tokens);
+    const parsed = try token_parser.parseTokensWithStats(allocator, token_stream.tokens);
+    return .{ .stream = parsed.stream, .stats = parsed.stats };
 }
 
 fn diagnosticAt(input: []const u8, offset: usize, message: []const u8) diagnostics.Diagnostic {

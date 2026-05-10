@@ -845,7 +845,7 @@ test "parseTokens rejects block scalar indicators as flow plain scalars" {
 test "parser helpers: incomplete flow mapping with only start returns false" {
     const tokens = [_]scanner.Token{.flow_mapping_start};
 
-    var events: std.ArrayList(parser.Event) = .empty;
+    var events: parser.EventBuilder = .{};
     defer events.deinit(std.testing.allocator);
 
     var index: usize = 0;
@@ -862,8 +862,8 @@ test "parser helpers: incomplete flow mapping with only start returns false" {
 
     try std.testing.expect(!parsed);
     try std.testing.expectEqual(@as(usize, tokens.len), index);
-    try std.testing.expectEqual(@as(usize, 1), events.items.len);
-    try std.testing.expect(events.items[0] == .mapping_start);
+    try std.testing.expectEqual(@as(usize, 1), events.slice().len);
+    try std.testing.expect(events.slice()[0] == .mapping_start);
 }
 test "parseTokens parses a flow mapping with a trailing comma" {
     var token_stream = try scanner.scan(std.testing.allocator, "{foo: bar,}\n");

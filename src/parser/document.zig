@@ -11,19 +11,20 @@ const types = @import("event.zig");
 
 const Error = types.Error;
 const Event = types.Event;
+const EventBuilder = token_cursor.EventBuilder;
 const ParseError = types.ParseError;
 const skipComments = token_cursor.skipComments;
 
 pub const AppendSingleDocumentFn = *const fn (
     allocator: std.mem.Allocator,
     document_tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
 ) Error!bool;
 
 pub fn appendSingleDocumentEvents(
     allocator: std.mem.Allocator,
     document_tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
     const wrapped = try allocator.alloc(scanner.Token, document_tokens.len + 2);
@@ -46,7 +47,7 @@ pub fn appendSingleDocumentEvents(
 fn appendScalarDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
     const parsed = parsers.parse_scalar_document(allocator, tokens) catch |err| switch (err) {
@@ -65,7 +66,7 @@ fn appendScalarDocumentEvents(
 fn appendAliasDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
     const parsed = try parsers.parse_alias_document(allocator, tokens) orelse return false;
@@ -80,7 +81,7 @@ fn appendAliasDocumentEvents(
 fn appendPlainBlockSequenceDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
     const parsed = try parsers.parse_plain_block_sequence_document(allocator, tokens) orelse return false;
@@ -103,7 +104,7 @@ fn appendPlainBlockSequenceDocumentEvents(
 fn appendPlainBlockMappingDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
     const parsed = try parsers.parse_plain_block_mapping_document(allocator, tokens) orelse return false;
@@ -127,7 +128,7 @@ fn appendPlainBlockMappingDocumentEvents(
 fn appendFlowSequenceDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
     const parsed = try parsers.parse_flow_sequence_document(allocator, tokens) orelse return false;
@@ -142,7 +143,7 @@ fn appendFlowSequenceDocumentEvents(
 fn appendFlowMappingDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
     const parsed = try parsers.parse_flow_mapping_document(allocator, tokens) orelse return false;
@@ -154,7 +155,7 @@ fn appendFlowMappingDocumentEvents(
     return true;
 }
 
-fn appendDocumentStart(allocator: std.mem.Allocator, events: *std.ArrayList(Event), parsed: anytype) Error!void {
+fn appendDocumentStart(allocator: std.mem.Allocator, events: *EventBuilder, parsed: anytype) Error!void {
     const Parsed = @TypeOf(parsed);
     try events.append(allocator, .{ .document_start = .{
         .explicit = parsed.explicit_start,
@@ -167,14 +168,14 @@ fn appendDocumentStart(allocator: std.mem.Allocator, events: *std.ArrayList(Even
     } });
 }
 
-fn appendDocumentEnd(allocator: std.mem.Allocator, events: *std.ArrayList(Event), parsed: anytype) Error!void {
+fn appendDocumentEnd(allocator: std.mem.Allocator, events: *EventBuilder, parsed: anytype) Error!void {
     try events.append(allocator, .{ .document_end = .{ .explicit = parsed.explicit_end } });
 }
 
 pub fn appendImplicitDocumentStartSeparatedStreamEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     append_single_document: AppendSingleDocumentFn,
 ) Error!bool {
     const end = tokens.len - 1;
@@ -214,7 +215,7 @@ pub fn appendImplicitDocumentStartSeparatedStreamEvents(
 fn appendRemainingDocumentStreamEvents(
     allocator: std.mem.Allocator,
     document_tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     append_single_document: AppendSingleDocumentFn,
 ) Error!bool {
     const wrapped = try wrapDocumentTokens(allocator, document_tokens);
@@ -229,7 +230,7 @@ fn appendRemainingDocumentStreamEvents(
 pub fn appendDocumentEndSeparatedStreamEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     append_single_document: AppendSingleDocumentFn,
 ) Error!bool {
     var index: usize = 1;
@@ -295,7 +296,7 @@ pub fn appendDocumentEndSeparatedStreamEvents(
 pub fn appendExplicitDocumentStreamEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
-    events: *std.ArrayList(Event),
+    events: *EventBuilder,
     append_single_document: AppendSingleDocumentFn,
 ) Error!bool {
     if (explicitDocumentStartCount(tokens) < 2) return false;
