@@ -27,6 +27,10 @@ const isMappingSeparatorAt = lex.isMappingSeparatorAt;
 const isSeparatedIndicatorAt = lex.isSeparatedIndicatorAt;
 const lineAt = lex.lineAt;
 
+const min_preallocated_input_bytes: usize = 1024;
+const token_capacity_input_divisor: usize = 4;
+const max_initial_token_capacity: usize = 8 * 1024;
+
 /// Tokenizes a YAML byte stream into lexical tokens.
 ///
 /// UTF-8 input is borrowed for the lifetime of the returned `TokenStream`.
@@ -39,6 +43,10 @@ pub fn scan(allocator: std.mem.Allocator, input: []const u8) Error!TokenStream {
 
     var tokens: std.ArrayList(Token) = .empty;
     defer tokens.deinit(arena_allocator);
+
+    if (initialTokenCapacity(utf8_input.len)) |capacity| {
+        try tokens.ensureTotalCapacity(arena_allocator, capacity);
+    }
 
     try tokens.append(arena_allocator, .stream_start);
 
@@ -414,6 +422,11 @@ fn flowDepth(scanner: anytype) usize {
     return scanner.square_depth + scanner.curly_depth;
 }
 
+fn initialTokenCapacity(input_len: usize) ?usize {
+    if (input_len < min_preallocated_input_bytes) return null;
+    return @min(max_initial_token_capacity, input_len / token_capacity_input_divisor);
+}
+
 fn colonStartsMappingValue(scanner: anytype) bool {
     const in_flow = flowDepth(scanner) != 0;
     if (lex.isMappingSeparatorAt(scanner.input, scanner.index, in_flow)) return true;
@@ -523,4 +536,10 @@ test "scanner indicator: compact sequence entry requires structural context afte
     try std.testing.expect(!try consumeCompactBlockSequenceEntry(&fake));
     try std.testing.expectEqual(@as(usize, 2), fake.index);
     try std.testing.expectEqual(@as(usize, 2), fake.tokens.items.len);
+}
+
+test "scanner token capacity estimate stays conservative" {
+    try std.testing.expectEqual(@as(?usize, null), initialTokenCapacity(97));
+    try std.testing.expectEqual(@as(?usize, 7509), initialTokenCapacity(30_036));
+    try std.testing.expectEqual(@as(?usize, 8192), initialTokenCapacity(1_000_000));
 }
