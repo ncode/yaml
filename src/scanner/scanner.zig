@@ -37,8 +37,6 @@ pub fn scan(allocator: std.mem.Allocator, input: []const u8) Error!TokenStream {
     const arena_allocator = source.allocator();
     const utf8_input = source.bytes;
 
-    try lex.validate(utf8_input);
-
     var tokens: std.ArrayList(Token) = .empty;
     defer tokens.deinit(arena_allocator);
 

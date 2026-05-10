@@ -218,6 +218,30 @@ test "parseTokens parses directives after explicit document end markers" {
     try std.testing.expect(event_stream.events[7] == .stream_end);
 }
 
+test "parseTokens parses explicit empty multi-document streams" {
+    var token_stream = try scanner.scan(std.testing.allocator, "---\n---\n");
+    defer token_stream.deinit();
+
+    var event_stream = try parseTokens(std.testing.allocator, token_stream.tokens);
+    defer event_stream.deinit();
+
+    try std.testing.expectEqual(@as(usize, 8), event_stream.events.len);
+    try std.testing.expect(event_stream.events[0] == .stream_start);
+    try std.testing.expect(event_stream.events[1] == .document_start);
+    try std.testing.expect(event_stream.events[1].document_start.explicit);
+    try std.testing.expect(event_stream.events[2] == .scalar);
+    try std.testing.expectEqualStrings("", event_stream.events[2].scalar.value);
+    try std.testing.expect(event_stream.events[3] == .document_end);
+    try std.testing.expect(!event_stream.events[3].document_end.explicit);
+    try std.testing.expect(event_stream.events[4] == .document_start);
+    try std.testing.expect(event_stream.events[4].document_start.explicit);
+    try std.testing.expect(event_stream.events[5] == .scalar);
+    try std.testing.expectEqualStrings("", event_stream.events[5].scalar.value);
+    try std.testing.expect(event_stream.events[6] == .document_end);
+    try std.testing.expect(!event_stream.events[6].document_end.explicit);
+    try std.testing.expect(event_stream.events[7] == .stream_end);
+}
+
 test "parseTokens parses explicit multi-document collection streams" {
     var token_stream = try scanner.scan(std.testing.allocator,
         \\---
@@ -376,7 +400,7 @@ test "parseTokens parses explicit document end comments" {
     try std.testing.expect(event_stream.events[4] == .stream_end);
 }
 
-fn rejectSingleDocument(_: std.mem.Allocator, _: []const scanner.Token, _: *parser.EventBuilder) parser.Error!bool {
+fn rejectSingleDocument(_: std.mem.Allocator, _: []const scanner.Token, _: usize, _: usize, _: *parser.EventBuilder) parser.Error!bool {
     return false;
 }
 

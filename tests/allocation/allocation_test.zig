@@ -6,4 +6,5 @@
 
 comptime {
     _ = @import("failure_injection_test.zig");
+    _ = @import("hot_path_test.zig");
 }

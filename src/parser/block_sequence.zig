@@ -58,8 +58,16 @@ pub fn parsePlainBlockSequenceDocumentTokens(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
 ) Error!?PlainSequenceDocumentTokens {
-    var index: usize = 1;
-    const end = tokens.len - 1;
+    return parsePlainBlockSequenceDocumentTokenRange(allocator, tokens, 1, tokens.len - 1);
+}
+
+pub fn parsePlainBlockSequenceDocumentTokenRange(
+    allocator: std.mem.Allocator,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
+) Error!?PlainSequenceDocumentTokens {
+    var index: usize = start;
 
     if (index == end) return null;
 
@@ -184,7 +192,7 @@ pub fn parsePlainBlockSequenceDocumentTokens(
         .directives = directives,
         .explicit_start = explicit_start,
         .explicit_end = explicit_end,
-        .force_document_start = flowCollectionDescendantSpansLines(tokens[1..end]),
+        .force_document_start = flowCollectionDescendantSpansLines(tokens[start..end]),
         .content_same_line = content_same_line,
         .content_same_line_separated_by_tab = document_start_content.separated_by_tab,
     };

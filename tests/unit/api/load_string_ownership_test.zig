@@ -70,6 +70,32 @@ test "loadStreamWithOptions owns strings after parser events are released" {
     try std.testing.expectEqual(value, root.mapping.pairs[1].value);
 }
 
+test "loadStreamWithOptions fast path owns strings after input is released" {
+    const input = try std.testing.allocator.dupe(u8,
+        \\!<tag:example.com,2000:map> &map
+        \\name: &name !<tag:example.com,2000:name> "decoded\nvalue"
+        \\
+    );
+
+    var stream = try loadStreamWithOptions(std.testing.allocator, input, .{});
+    defer stream.deinit();
+
+    @memset(input, 0xa5);
+    std.testing.allocator.free(input);
+
+    try std.testing.expectEqual(@as(usize, 1), stream.documents.len);
+    const root = stream.documents[0];
+    try std.testing.expect(root.* == .mapping);
+    try std.testing.expectEqualStrings("map", root.mapping.anchor.?);
+    try std.testing.expectEqualStrings("tag:example.com,2000:map", root.mapping.tag.?);
+
+    try expectScalarString(root.mapping.pairs[0].key, "name");
+    const value = root.mapping.pairs[0].value;
+    try expectScalarString(value, "decoded\nvalue");
+    try std.testing.expectEqualStrings("name", value.scalar.anchor.?);
+    try std.testing.expectEqualStrings("tag:example.com,2000:name", value.scalar.tag.?);
+}
+
 const PoisonOnFreeAllocator = struct {
     child: std.mem.Allocator,
 

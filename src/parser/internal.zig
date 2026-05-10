@@ -648,7 +648,7 @@ pub fn parseFlowPlainBlockNode(
     const start = index.*;
     var events: EventBuilder = .{};
     defer events.deinit(allocator);
-    try events.ensureTotalCapacity(allocator, end - index.*);
+    try events.ensureTotalCapacity(allocator, @min(end - index.*, 16));
 
     const parsed = if (index.* < end and tokens[index.*] == .flow_sequence_start)
         try flow.appendSequenceNodeEvents(allocator, tokens, index, end, &events, 0, properties, directives)

@@ -373,14 +373,32 @@ pub fn parseSequenceTokens(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
 ) Error!?FlowNodeDocumentTokens {
-    return parseTokens(allocator, tokens, .sequence_start);
+    return parseTokens(allocator, tokens, 1, tokens.len - 1, .sequence_start);
+}
+
+pub fn parseSequenceTokenRange(
+    allocator: std.mem.Allocator,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
+) Error!?FlowNodeDocumentTokens {
+    return parseTokens(allocator, tokens, start, end, .sequence_start);
 }
 
 pub fn parseMappingTokens(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
 ) Error!?FlowNodeDocumentTokens {
-    return parseTokens(allocator, tokens, .mapping_start);
+    return parseTokens(allocator, tokens, 1, tokens.len - 1, .mapping_start);
+}
+
+pub fn parseMappingTokenRange(
+    allocator: std.mem.Allocator,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
+) Error!?FlowNodeDocumentTokens {
+    return parseTokens(allocator, tokens, start, end, .mapping_start);
 }
 
 const ExpectedRootEvent = enum {
@@ -391,10 +409,11 @@ const ExpectedRootEvent = enum {
 fn parseTokens(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     expected_root: ExpectedRootEvent,
 ) Error!?FlowNodeDocumentTokens {
-    var index: usize = 1;
-    const end = tokens.len - 1;
+    var index: usize = start;
 
     if (index == end) return null;
 
@@ -414,7 +433,7 @@ fn parseTokens(
 
     var node_events: EventBuilder = .{};
     defer node_events.deinit(allocator);
-    try node_events.ensureTotalCapacity(allocator, end - index);
+    try node_events.ensureTotalCapacity(allocator, @min(end - index, 16));
     var properties = try internal.consumeTopLevelSeparated(allocator, tokens, &index, end, directives);
     if (!internal.has(properties)) {
         properties = try internal.consumeNodeProperties(allocator, tokens, &index, end, directives);

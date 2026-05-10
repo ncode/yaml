@@ -35,12 +35,16 @@ pub const appendDocumentEndSeparatedStreamEvents = document.appendDocumentEndSep
 pub const appendExplicitDocumentStreamEvents = document.appendExplicitDocumentStreamEvents;
 pub const appendImplicitDocumentStartSeparatedStreamEvents = document.appendImplicitDocumentStartSeparatedStreamEvents;
 pub const parseAliasDocumentTokens = scalar_parser.parseAliasTokens;
+const parseAliasDocumentTokenRange = scalar_parser.parseAliasTokenRange;
 pub const appendNodeEvents = flow.appendNodeEvents;
 pub const appendMappingNodeEvents = flow.appendMappingNodeEvents;
 pub const parseFlowMappingDocumentTokens = flow.parseMappingTokens;
+const parseFlowMappingDocumentTokenRange = flow.parseMappingTokenRange;
 pub const parseFlowPlainBlockNode = internal.parseFlowPlainBlockNode;
 pub const parseFlowSequenceDocumentTokens = flow.parseSequenceTokens;
+const parseFlowSequenceDocumentTokenRange = flow.parseSequenceTokenRange;
 pub const parseScalarDocumentTokens = scalar_parser.parseScalarTokens;
+const parseScalarDocumentTokenRange = scalar_parser.parseScalarTokenRange;
 pub const consumeBlockCollectionProperties = internal.consumeBlockCollectionProperties;
 pub const compactBlockSequenceEntryHasSameLineContent = internal.compactBlockSequenceEntryHasSameLineContent;
 pub const consumeNestedBlockCollectionPropertyLine = internal.consumeNestedBlockCollectionPropertyLine;
@@ -93,6 +97,7 @@ pub const parsePlainBlockSequenceItemAfterIndicator = block_sequence.parsePlainB
 pub const parseIndentedPlainBlockSequenceItemNode = block_sequence.parseIndentedPlainBlockSequenceItemNode;
 pub const PlainSequenceDocumentTokens = block_sequence.PlainSequenceDocumentTokens;
 pub const parsePlainBlockSequenceDocumentTokens = block_sequence.parsePlainBlockSequenceDocumentTokens;
+const parsePlainBlockSequenceDocumentTokenRange = block_sequence.parsePlainBlockSequenceDocumentTokenRange;
 pub const parseIndentlessPlainBlockSequenceNode = block_sequence.parseIndentlessPlainBlockSequenceNode;
 pub const parseNestedPlainBlockSequenceNode = block_sequence.parseNestedPlainBlockSequenceNode;
 pub const parsePlainBlockMappingKeyNode = block_mapping.parsePlainBlockMappingKeyNode;
@@ -114,6 +119,7 @@ pub const parseCompactExplicitBlockMappingKeyNode = block_mapping.parseCompactEx
 pub const parseCompactPlainBlockMappingNode = block_mapping.parseCompactPlainBlockMappingNode;
 pub const PlainMappingDocumentTokens = block_mapping.PlainMappingDocumentTokens;
 pub const parsePlainBlockMappingDocumentTokens = block_mapping.parsePlainBlockMappingDocumentTokens;
+const parsePlainBlockMappingDocumentTokenRange = block_mapping.parsePlainBlockMappingDocumentTokenRange;
 pub const parseNestedPlainBlockMappingNode = block_mapping.parseNestedPlainBlockMappingNode;
 
 pub const DocumentRootClass = enum {
@@ -136,8 +142,11 @@ pub fn classifyDocumentRoot(tokens: []const scanner.Token) DocumentRootClass {
     if (tokens.len < 2) return .fallback;
     if (tokens[0] != .stream_start or tokens[tokens.len - 1] != .stream_end) return .fallback;
 
-    const end = tokens.len - 1;
-    var index: usize = 1;
+    return classifyDocumentRootRange(tokens, 1, tokens.len - 1);
+}
+
+fn classifyDocumentRootRange(tokens: []const scanner.Token, start: usize, end: usize) DocumentRootClass {
+    var index: usize = start;
     skipComments(tokens, &index, end);
     if (index == end) return .empty;
     if (tokens[index] == .document_end) {
@@ -428,16 +437,19 @@ fn shouldTryRootClass(actual: DocumentRootClass, expected: DocumentRootClass) bo
 
 fn appendSingleDocumentEvents(
     allocator: std.mem.Allocator,
-    document_tokens: []const scanner.Token,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
 ) Error!bool {
-    return document.appendSingleDocumentEvents(allocator, document_tokens, events, .{
-        .parse_scalar_document = parseScalarDocumentTokens,
-        .parse_alias_document = parseAliasDocumentTokens,
-        .parse_plain_block_sequence_document = parsePlainBlockSequenceDocumentTokens,
-        .parse_plain_block_mapping_document = parsePlainBlockMappingDocumentTokens,
-        .parse_flow_sequence_document = parseFlowSequenceDocumentTokens,
-        .parse_flow_mapping_document = parseFlowMappingDocumentTokens,
+    return document.appendSingleDocumentEvents(allocator, tokens, start, end, events, .{
+        .root_class = classifyDocumentRootRange(tokens, start, end),
+        .parse_scalar_document_range = parseScalarDocumentTokenRange,
+        .parse_alias_document_range = parseAliasDocumentTokenRange,
+        .parse_plain_block_sequence_document_range = parsePlainBlockSequenceDocumentTokenRange,
+        .parse_plain_block_mapping_document_range = parsePlainBlockMappingDocumentTokenRange,
+        .parse_flow_sequence_document_range = parseFlowSequenceDocumentTokenRange,
+        .parse_flow_mapping_document_range = parseFlowMappingDocumentTokenRange,
         .append_plain_block_node_event = appendPlainBlockNodeEvent,
     });
 }

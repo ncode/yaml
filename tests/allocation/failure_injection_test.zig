@@ -99,6 +99,11 @@ fn checkLoadStreamAllocationFailure(failing_allocator: std.mem.Allocator) !void 
         \\
         ,
         \\---
+        \\!<tag:example.com,2000:map> &map
+        \\name: &name !<tag:example.com,2000:name> "decoded\\nvalue"
+        \\
+        ,
+        \\---
         \\anchor: &value {nested: [one, two]}
         \\alias: *value
         \\

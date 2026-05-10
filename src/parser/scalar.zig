@@ -31,8 +31,10 @@ pub const parseBlockScalarToken = block_scalar.parseBlockScalarToken;
 pub const parseBlockScalarTokenAt = block_scalar.parseBlockScalarTokenAt;
 pub const ScalarDocumentTokens = document_scalar.ScalarDocumentTokens;
 pub const parseScalarTokens = document_scalar.parseScalarTokens;
+pub const parseScalarTokenRange = document_scalar.parseScalarTokenRange;
 pub const AliasDocumentTokens = document_scalar.AliasDocumentTokens;
 pub const parseAliasTokens = document_scalar.parseAliasTokens;
+pub const parseAliasTokenRange = document_scalar.parseAliasTokenRange;
 
 pub fn parseScalarToken(allocator: std.mem.Allocator, value: []const u8) Error!types.Scalar {
     if (value.len == 0) return ParseError.Unsupported;
@@ -370,6 +372,7 @@ const plain_scalar_rules = struct {
 const plain_scalar_value = struct {
     pub fn parsePlainScalarValue(allocator: std.mem.Allocator, input: []const u8) Error![]const u8 {
         if (!source_slice.containsLineBreak(input)) {
+            if (!singleLinePlainScalarNeedsNormalization(input)) return allocator.dupe(u8, input);
             return allocator.dupe(u8, std.mem.trimEnd(u8, stripLineComment(input), " \t\r"));
         }
 
@@ -428,6 +431,16 @@ const plain_scalar_value = struct {
         return false;
     }
 
+    fn singleLinePlainScalarNeedsNormalization(input: []const u8) bool {
+        if (input.len != std.mem.trimEnd(u8, input, " \t\r").len) return true;
+
+        var index: usize = 0;
+        while (index < input.len) : (index += 1) {
+            if (input[index] == '#' and index > 0 and isCommentStart(input, index)) return true;
+        }
+        return false;
+    }
+
     fn stripLineComment(input: []const u8) []const u8 {
         var index: usize = 0;
         while (index < input.len) : (index += 1) {
@@ -482,6 +495,9 @@ const quoted_scalar = struct {
     pub fn parseSingleQuotedScalarToken(allocator: std.mem.Allocator, value: []const u8) Error![]const u8 {
         if (value.len < 2 or value[value.len - 1] != '\'') return ParseError.InvalidSyntax;
 
+        const content = value[1 .. value.len - 1];
+        if (std.mem.indexOfAny(u8, content, "'\n\r") == null) return allocator.dupe(u8, content);
+
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
 
@@ -508,6 +524,9 @@ const quoted_scalar = struct {
 
     pub fn parseDoubleQuotedScalarToken(allocator: std.mem.Allocator, value: []const u8) Error![]const u8 {
         if (value.len < 2 or value[value.len - 1] != '"') return ParseError.InvalidSyntax;
+
+        const content = value[1 .. value.len - 1];
+        if (std.mem.indexOfAny(u8, content, "\"\\\n\r") == null) return allocator.dupe(u8, content);
 
         var out: std.ArrayList(u8) = .empty;
         errdefer out.deinit(allocator);
@@ -1037,8 +1056,16 @@ const document_scalar = struct {
     };
 
     pub fn parseScalarTokens(allocator: std.mem.Allocator, tokens: []const scanner.Token) Error!@This().ScalarDocumentTokens {
-        var index: usize = 1;
-        const end = tokens.len - 1;
+        return @This().parseScalarTokenRange(allocator, tokens, 1, tokens.len - 1);
+    }
+
+    pub fn parseScalarTokenRange(
+        allocator: std.mem.Allocator,
+        tokens: []const scanner.Token,
+        start: usize,
+        end: usize,
+    ) Error!@This().ScalarDocumentTokens {
+        var index: usize = start;
 
         if (index == end) return .{ .scalar = null };
 
@@ -1158,8 +1185,16 @@ const document_scalar = struct {
     };
 
     pub fn parseAliasTokens(allocator: std.mem.Allocator, tokens: []const scanner.Token) Error!?@This().AliasDocumentTokens {
-        var index: usize = 1;
-        const end = tokens.len - 1;
+        return @This().parseAliasTokenRange(allocator, tokens, 1, tokens.len - 1);
+    }
+
+    pub fn parseAliasTokenRange(
+        allocator: std.mem.Allocator,
+        tokens: []const scanner.Token,
+        start: usize,
+        end: usize,
+    ) Error!?@This().AliasDocumentTokens {
+        var index: usize = start;
 
         if (index == end) return null;
 

@@ -8,6 +8,7 @@ const support = @import("support.zig");
 
 const std = support.std;
 const scanner = support.scanner;
+const parser = support.event_parser.parser;
 const parseTokens = support.parseTokens;
 const ParseError = support.ParseError;
 const types = support.types;
@@ -35,6 +36,76 @@ test "parseTokens parses plain scalar comments" {
     try std.testing.expect(event_stream.events[3].document_end.explicit);
     try std.testing.expect(event_stream.events[4] == .stream_end);
 }
+
+test "parseScalarToken fast paths simple scalar allocations" {
+    const content = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-simple-scalar-content";
+    const plain_token = content;
+    const single_token = "'" ++ content ++ "'";
+    const double_token = "\"" ++ content ++ "\"";
+
+    try expectSimpleScalarAllocation(plain_token, content, .plain);
+    try expectSimpleScalarAllocation(single_token, content, .single_quoted);
+    try expectSimpleScalarAllocation(double_token, content, .double_quoted);
+}
+
+fn expectSimpleScalarAllocation(token: []const u8, expected: []const u8, style: types.ScalarStyle) !void {
+    var counter: CountingAllocator = .{ .child = std.testing.allocator };
+    const counted_allocator = counter.allocator();
+
+    const parsed = try parser.parseScalarToken(counted_allocator, token);
+    defer counted_allocator.free(parsed.value);
+
+    try std.testing.expectEqual(style, parsed.style);
+    try std.testing.expectEqualStrings(expected, parsed.value);
+    try std.testing.expectEqual(expected.len, counter.allocated_bytes);
+}
+
+const CountingAllocator = struct {
+    child: std.mem.Allocator,
+    allocated_bytes: usize = 0,
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.child.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.allocated_bytes += len;
+        return result;
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        if (!self.child.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        self.countResize(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.child.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        self.countResize(memory.len, new_len);
+        return result;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+
+    fn countResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {
+        if (new_len > old_len) self.allocated_bytes += new_len - old_len;
+    }
+};
 
 test "parseTokens parses an explicit empty document with comments" {
     var token_stream = try scanner.scan(std.testing.allocator,

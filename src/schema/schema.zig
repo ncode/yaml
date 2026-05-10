@@ -93,8 +93,10 @@ fn resolveKnownJsonPlainScalar(value: []const u8) ?ResolvedScalar {
     if (std.mem.eql(u8, value, "null")) return .null_value;
     if (std.mem.eql(u8, value, "true")) return .{ .bool_value = true };
     if (std.mem.eql(u8, value, "false")) return .{ .bool_value = false };
-    if (scalars.int_scalar.parseJson(value)) |int_value| return .{ .int_value = int_value };
-    if (scalars.float_scalar.parseJson(value)) |float_value| return .{ .float_value = float_value };
+    if (mayBeJsonNumber(value)) {
+        if (scalars.int_scalar.parseJson(value)) |int_value| return .{ .int_value = int_value };
+        if (scalars.float_scalar.parseJson(value)) |float_value| return .{ .float_value = float_value };
+    }
     return null;
 }
 
@@ -102,8 +104,10 @@ fn resolveKnownJsonPlainScalar(value: []const u8) ?ResolvedScalar {
 fn resolveCorePlainScalar(value: []const u8) ?ResolvedScalar {
     if (scalars.null_scalar.isCoreValue(value)) return .null_value;
     if (scalars.bool_scalar.parseCore(value)) |bool_value| return .{ .bool_value = bool_value };
-    if (scalars.int_scalar.parseCore(value)) |int_value| return .{ .int_value = int_value };
-    if (scalars.float_scalar.parseCore(value, .implicit)) |float_value| return .{ .float_value = float_value };
+    if (mayBeCoreNumeric(value)) {
+        if (scalars.int_scalar.parseCore(value)) |int_value| return .{ .int_value = int_value };
+        if (scalars.float_scalar.parseCore(value, .implicit)) |float_value| return .{ .float_value = float_value };
+    }
     return null;
 }
 
@@ -111,9 +115,21 @@ fn resolveCorePlainScalar(value: []const u8) ?ResolvedScalar {
 fn resolvesCorePlainScalar(value: []const u8) bool {
     if (scalars.null_scalar.isCoreValue(value)) return true;
     if (scalars.bool_scalar.parseCore(value) != null) return true;
-    if (scalars.int_scalar.parseCore(value) != null) return true;
-    if (scalars.float_scalar.parseCore(value, .implicit) != null) return true;
+    if (mayBeCoreNumeric(value)) {
+        if (scalars.int_scalar.parseCore(value) != null) return true;
+        if (scalars.float_scalar.parseCore(value, .implicit) != null) return true;
+    }
     return false;
+}
+
+fn mayBeJsonNumber(value: []const u8) bool {
+    if (value.len == 0) return false;
+    return value[0] == '-' or std.ascii.isDigit(value[0]);
+}
+
+fn mayBeCoreNumeric(value: []const u8) bool {
+    if (value.len == 0) return false;
+    return value[0] == '+' or value[0] == '-' or value[0] == '.' or std.ascii.isDigit(value[0]);
 }
 
 /// Returns true when the scalar resolves to a core-schema null.
@@ -159,6 +175,18 @@ test "resolver: core helper wrappers use core implicit semantics" {
     try std.testing.expect(isCoreNullScalar("~", true, null));
     try std.testing.expect(!isCoreNullScalar("~", false, null));
     try std.testing.expect(isCoreNullScalar("~", false, "tag:yaml.org,2002:null"));
+}
+
+test "resolver: numeric spelling guards classify impossible parser inputs" {
+    try std.testing.expect(!mayBeJsonNumber("plain string"));
+    try std.testing.expect(!mayBeJsonNumber("+1"));
+    try std.testing.expect(mayBeJsonNumber("-1"));
+    try std.testing.expect(mayBeJsonNumber("1.0"));
+
+    try std.testing.expect(!mayBeCoreNumeric("plain string"));
+    try std.testing.expect(!mayBeCoreNumeric("falsehood"));
+    try std.testing.expect(mayBeCoreNumeric("+0x2A"));
+    try std.testing.expect(mayBeCoreNumeric(".Inf"));
 }
 
 test "failsafe schema" {

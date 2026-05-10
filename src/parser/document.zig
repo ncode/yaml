@@ -17,40 +17,182 @@ const skipComments = token_cursor.skipComments;
 
 pub const AppendSingleDocumentFn = *const fn (
     allocator: std.mem.Allocator,
-    document_tokens: []const scanner.Token,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
 ) Error!bool;
 
 pub fn appendSingleDocumentEvents(
     allocator: std.mem.Allocator,
-    document_tokens: []const scanner.Token,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
-    const wrapped = try allocator.alloc(scanner.Token, document_tokens.len + 2);
-    defer allocator.free(wrapped);
-
-    wrapped[0] = .stream_start;
-    @memcpy(wrapped[1 .. wrapped.len - 1], document_tokens);
-    wrapped[wrapped.len - 1] = .stream_end;
-
-    if (try appendScalarDocumentEvents(allocator, wrapped, events, parsers)) return true;
-    if (try appendAliasDocumentEvents(allocator, wrapped, events, parsers)) return true;
-    if (try appendPlainBlockSequenceDocumentEvents(allocator, wrapped, events, parsers)) return true;
-    if (try appendPlainBlockMappingDocumentEvents(allocator, wrapped, events, parsers)) return true;
-    if (try appendFlowSequenceDocumentEvents(allocator, wrapped, events, parsers)) return true;
-    if (try appendFlowMappingDocumentEvents(allocator, wrapped, events, parsers)) return true;
+    const root_class = parsers.root_class;
+    if (shouldTryDocumentParser(root_class, .scalar) and try appendScalarDocumentEvents(allocator, tokens, start, end, events, parsers)) return true;
+    if (shouldTryDocumentParser(root_class, .alias) and try appendAliasDocumentEvents(allocator, tokens, start, end, events, parsers)) return true;
+    if (shouldTryDocumentParser(root_class, .block_sequence) and try appendPlainBlockSequenceDocumentEvents(allocator, tokens, start, end, events, parsers)) return true;
+    if (shouldTryDocumentParser(root_class, .block_mapping) and try appendPlainBlockMappingDocumentEvents(allocator, tokens, start, end, events, parsers)) return true;
+    if (shouldTryDocumentParser(root_class, .flow_sequence) and try appendFlowSequenceDocumentEvents(allocator, tokens, start, end, events, parsers)) return true;
+    if (shouldTryDocumentParser(root_class, .flow_mapping) and try appendFlowMappingDocumentEvents(allocator, tokens, start, end, events, parsers)) return true;
 
     return false;
 }
 
+fn shouldTryDocumentParser(root_class: anytype, comptime expected: @TypeOf(root_class)) bool {
+    return root_class == .fallback or root_class == expected or (root_class == .empty and expected == .scalar);
+}
+
+test "document dispatch does not allocate token wrappers before parser callbacks" {
+    const tokens = [_]scanner.Token{ .stream_start, .{ .scalar = "value" }, .stream_end };
+    var events: EventBuilder = .{};
+    defer events.deinit(std.testing.allocator);
+
+    const parsed = try appendSingleDocumentEvents(noAllocAllocator(), &tokens, 1, tokens.len - 1, &events, .{
+        .root_class = TestRootClass.fallback,
+        .parse_scalar_document_range = rejectScalarDocument,
+        .parse_alias_document_range = rejectAliasDocument,
+        .parse_plain_block_sequence_document_range = rejectPlainSequenceDocument,
+        .parse_plain_block_mapping_document_range = rejectPlainMappingDocument,
+        .parse_flow_sequence_document_range = rejectFlowDocument,
+        .parse_flow_mapping_document_range = rejectFlowDocument,
+        .append_plain_block_node_event = rejectAppendPlainBlockNodeEvent,
+    });
+    try std.testing.expect(!parsed);
+    try std.testing.expectEqual(@as(usize, 0), events.slice().len);
+}
+
+test "document dispatch skips parser callbacks for classified roots" {
+    const tokens = [_]scanner.Token{ .stream_start, .flow_sequence_start, .flow_sequence_end, .stream_end };
+    var events: EventBuilder = .{};
+    defer events.deinit(std.testing.allocator);
+
+    const parsed = try appendSingleDocumentEvents(std.testing.allocator, &tokens, 1, tokens.len - 1, &events, .{
+        .root_class = TestRootClass.flow_sequence,
+        .parse_scalar_document_range = failScalarDocument,
+        .parse_alias_document_range = rejectAliasDocument,
+        .parse_plain_block_sequence_document_range = rejectPlainSequenceDocument,
+        .parse_plain_block_mapping_document_range = rejectPlainMappingDocument,
+        .parse_flow_sequence_document_range = rejectFlowDocument,
+        .parse_flow_mapping_document_range = rejectFlowDocument,
+        .append_plain_block_node_event = rejectAppendPlainBlockNodeEvent,
+    });
+    try std.testing.expect(!parsed);
+}
+
+test "document dispatch preserves fallback parser order" {
+    const tokens = [_]scanner.Token{ .stream_start, .flow_sequence_start, .flow_sequence_end, .stream_end };
+    var events: EventBuilder = .{};
+    defer events.deinit(std.testing.allocator);
+
+    try std.testing.expectError(ParseError.InvalidSyntax, appendSingleDocumentEvents(std.testing.allocator, &tokens, 1, tokens.len - 1, &events, .{
+        .root_class = TestRootClass.fallback,
+        .parse_scalar_document_range = failScalarDocument,
+        .parse_alias_document_range = rejectAliasDocument,
+        .parse_plain_block_sequence_document_range = rejectPlainSequenceDocument,
+        .parse_plain_block_mapping_document_range = rejectPlainMappingDocument,
+        .parse_flow_sequence_document_range = rejectFlowDocument,
+        .parse_flow_mapping_document_range = rejectFlowDocument,
+        .append_plain_block_node_event = rejectAppendPlainBlockNodeEvent,
+    }));
+}
+
+const TestRootClass = enum {
+    fallback,
+    empty,
+    scalar,
+    alias,
+    block_sequence,
+    block_mapping,
+    flow_sequence,
+    flow_mapping,
+};
+
+const RejectDocument = struct {
+    scalar: ?types.Scalar = null,
+    value: []const u8 = "",
+    items: []const u8 = &.{},
+    pairs: []const RejectPair = &.{},
+    events: []const Event = &.{},
+    properties: token_cursor.NodeProperties = .{},
+    directives: token_cursor.TokenDirectives = .{},
+    explicit_start: bool = false,
+    explicit_end: bool = false,
+    content_same_line: bool = false,
+    content_same_line_separated_by_tab: bool = false,
+};
+
+const RejectPair = struct {
+    key: u8 = 0,
+    value: u8 = 0,
+};
+
+fn rejectScalarDocument(_: std.mem.Allocator, _: []const scanner.Token, _: usize, _: usize) Error!RejectDocument {
+    return ParseError.Unsupported;
+}
+
+fn failScalarDocument(_: std.mem.Allocator, _: []const scanner.Token, _: usize, _: usize) Error!RejectDocument {
+    return ParseError.InvalidSyntax;
+}
+
+fn rejectAliasDocument(_: std.mem.Allocator, _: []const scanner.Token, _: usize, _: usize) Error!?RejectDocument {
+    return null;
+}
+
+fn rejectPlainSequenceDocument(_: std.mem.Allocator, _: []const scanner.Token, _: usize, _: usize) Error!?RejectDocument {
+    return null;
+}
+
+fn rejectPlainMappingDocument(_: std.mem.Allocator, _: []const scanner.Token, _: usize, _: usize) Error!?RejectDocument {
+    return null;
+}
+
+fn rejectFlowDocument(_: std.mem.Allocator, _: []const scanner.Token, _: usize, _: usize) Error!?RejectDocument {
+    return null;
+}
+
+fn rejectAppendPlainBlockNodeEvent(_: std.mem.Allocator, _: *EventBuilder, _: anytype) Error!void {
+    return ParseError.Unsupported;
+}
+
+fn noAllocAllocator() std.mem.Allocator {
+    return .{
+        .ptr = undefined,
+        .vtable = &.{
+            .alloc = noAlloc,
+            .resize = noResize,
+            .remap = noRemap,
+            .free = noFree,
+        },
+    };
+}
+
+fn noAlloc(_: *anyopaque, _: usize, _: std.mem.Alignment, _: usize) ?[*]u8 {
+    return null;
+}
+
+fn noResize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+    return false;
+}
+
+fn noRemap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) ?[*]u8 {
+    return null;
+}
+
+fn noFree(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {}
+
 fn appendScalarDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
-    const parsed = parsers.parse_scalar_document(allocator, tokens) catch |err| switch (err) {
+    const parsed = parsers.parse_scalar_document_range(allocator, tokens, start, end) catch |err| switch (err) {
         ParseError.Unsupported => return false,
         else => return err,
     };
@@ -66,10 +208,12 @@ fn appendScalarDocumentEvents(
 fn appendAliasDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
-    const parsed = try parsers.parse_alias_document(allocator, tokens) orelse return false;
+    const parsed = try parsers.parse_alias_document_range(allocator, tokens, start, end) orelse return false;
 
     try appendDocumentStart(allocator, events, parsed);
     try events.append(allocator, .{ .alias = parsed.value });
@@ -81,10 +225,12 @@ fn appendAliasDocumentEvents(
 fn appendPlainBlockSequenceDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
-    const parsed = try parsers.parse_plain_block_sequence_document(allocator, tokens) orelse return false;
+    const parsed = try parsers.parse_plain_block_sequence_document_range(allocator, tokens, start, end) orelse return false;
 
     try appendDocumentStart(allocator, events, parsed);
     try events.append(allocator, .{ .sequence_start = .{
@@ -104,10 +250,12 @@ fn appendPlainBlockSequenceDocumentEvents(
 fn appendPlainBlockMappingDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
-    const parsed = try parsers.parse_plain_block_mapping_document(allocator, tokens) orelse return false;
+    const parsed = try parsers.parse_plain_block_mapping_document_range(allocator, tokens, start, end) orelse return false;
 
     try appendDocumentStart(allocator, events, parsed);
     try events.append(allocator, .{ .mapping_start = .{
@@ -128,10 +276,12 @@ fn appendPlainBlockMappingDocumentEvents(
 fn appendFlowSequenceDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
-    const parsed = try parsers.parse_flow_sequence_document(allocator, tokens) orelse return false;
+    const parsed = try parsers.parse_flow_sequence_document_range(allocator, tokens, start, end) orelse return false;
 
     try appendDocumentStart(allocator, events, parsed);
     try events.appendSlice(allocator, parsed.events);
@@ -143,10 +293,12 @@ fn appendFlowSequenceDocumentEvents(
 fn appendFlowMappingDocumentEvents(
     allocator: std.mem.Allocator,
     tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     parsers: anytype,
 ) Error!bool {
-    const parsed = try parsers.parse_flow_mapping_document(allocator, tokens) orelse return false;
+    const parsed = try parsers.parse_flow_mapping_document_range(allocator, tokens, start, end) orelse return false;
 
     try appendDocumentStart(allocator, events, parsed);
     try events.appendSlice(allocator, parsed.events);
@@ -201,11 +353,11 @@ pub fn appendImplicitDocumentStartSeparatedStreamEvents(
     }
 
     const document_boundary = boundary orelse return false;
-    if (!try append_single_document(allocator, tokens[1..document_boundary], events)) {
+    if (!try append_single_document(allocator, tokens, 1, document_boundary, events)) {
         return ParseError.Unsupported;
     }
 
-    if (try appendRemainingDocumentStreamEvents(allocator, tokens[document_boundary..end], events, append_single_document)) {
+    if (try appendRemainingDocumentStreamEvents(allocator, tokens, document_boundary, end, events, append_single_document)) {
         return true;
     }
 
@@ -214,16 +366,15 @@ pub fn appendImplicitDocumentStartSeparatedStreamEvents(
 
 fn appendRemainingDocumentStreamEvents(
     allocator: std.mem.Allocator,
-    document_tokens: []const scanner.Token,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
     events: *EventBuilder,
     append_single_document: AppendSingleDocumentFn,
 ) Error!bool {
-    const wrapped = try wrapDocumentTokens(allocator, document_tokens);
-    defer allocator.free(wrapped);
-
-    if (try appendDocumentEndSeparatedStreamEvents(allocator, wrapped, events, append_single_document)) return true;
-    if (try appendExplicitDocumentStreamEvents(allocator, wrapped, events, append_single_document)) return true;
-    if (try append_single_document(allocator, document_tokens, events)) return true;
+    if (try appendDocumentEndSeparatedStreamEventsRange(allocator, tokens, start, end, events, append_single_document)) return true;
+    if (try appendExplicitDocumentStreamEventsRange(allocator, tokens, start, end, events, append_single_document)) return true;
+    if (try append_single_document(allocator, tokens, start, end, events)) return true;
     return false;
 }
 
@@ -233,8 +384,18 @@ pub fn appendDocumentEndSeparatedStreamEvents(
     events: *EventBuilder,
     append_single_document: AppendSingleDocumentFn,
 ) Error!bool {
-    var index: usize = 1;
-    const end = tokens.len - 1;
+    return appendDocumentEndSeparatedStreamEventsRange(allocator, tokens, 1, tokens.len - 1, events, append_single_document);
+}
+
+fn appendDocumentEndSeparatedStreamEventsRange(
+    allocator: std.mem.Allocator,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
+    events: *EventBuilder,
+    append_single_document: AppendSingleDocumentFn,
+) Error!bool {
+    var index: usize = start;
     var saw_boundary = false;
 
     while (index < end) {
@@ -262,7 +423,7 @@ pub fn appendDocumentEndSeparatedStreamEvents(
 
         if (document_end >= end) {
             if (!saw_boundary) return false;
-            if (!try append_single_document(allocator, tokens[document_start..end], events)) {
+            if (!try append_single_document(allocator, tokens, document_start, end, events)) {
                 return ParseError.Unsupported;
             }
             return true;
@@ -272,7 +433,7 @@ pub fn appendDocumentEndSeparatedStreamEvents(
         skipComments(tokens, &next_document, end);
         if (next_document >= end) {
             if (!saw_boundary) return false;
-            if (!try append_single_document(allocator, tokens[document_start..next_document], events)) {
+            if (!try append_single_document(allocator, tokens, document_start, next_document, events)) {
                 return ParseError.Unsupported;
             }
             return true;
@@ -284,7 +445,7 @@ pub fn appendDocumentEndSeparatedStreamEvents(
         }
 
         saw_boundary = true;
-        if (!try append_single_document(allocator, tokens[document_start..next_document], events)) {
+        if (!try append_single_document(allocator, tokens, document_start, next_document, events)) {
             return ParseError.Unsupported;
         }
         index = next_document;
@@ -299,10 +460,20 @@ pub fn appendExplicitDocumentStreamEvents(
     events: *EventBuilder,
     append_single_document: AppendSingleDocumentFn,
 ) Error!bool {
-    if (explicitDocumentStartCount(tokens) < 2) return false;
+    return appendExplicitDocumentStreamEventsRange(allocator, tokens, 1, tokens.len - 1, events, append_single_document);
+}
 
-    var index: usize = 1;
-    const end = tokens.len - 1;
+fn appendExplicitDocumentStreamEventsRange(
+    allocator: std.mem.Allocator,
+    tokens: []const scanner.Token,
+    start: usize,
+    end: usize,
+    events: *EventBuilder,
+    append_single_document: AppendSingleDocumentFn,
+) Error!bool {
+    if (explicitDocumentStartCount(tokens[start..end]) < 2) return false;
+
+    var index: usize = start;
 
     while (index < end) {
         skipComments(tokens, &index, end);
@@ -327,22 +498,12 @@ pub fn appendExplicitDocumentStreamEvents(
             if (flow_depth == 0 and isUnindentedDirectiveLikeContent(tokens, index, end)) return ParseError.InvalidSyntax;
         }
 
-        if (!try append_single_document(allocator, tokens[document_prefix_start..index], events)) {
+        if (!try append_single_document(allocator, tokens, document_prefix_start, index, events)) {
             return ParseError.Unsupported;
         }
     }
 
     return true;
-}
-
-fn wrapDocumentTokens(allocator: std.mem.Allocator, document_tokens: []const scanner.Token) Error![]scanner.Token {
-    const wrapped = try allocator.alloc(scanner.Token, document_tokens.len + 2);
-    errdefer allocator.free(wrapped);
-
-    wrapped[0] = .stream_start;
-    @memcpy(wrapped[1 .. wrapped.len - 1], document_tokens);
-    wrapped[wrapped.len - 1] = .stream_end;
-    return wrapped;
 }
 
 fn findExplicitDocumentStartAfterPrefix(tokens: []const scanner.Token, start: usize, end: usize) ?usize {

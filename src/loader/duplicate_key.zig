@@ -19,9 +19,18 @@ const SequenceNode = value.SequenceNode;
 const max_node_compare_depth: usize = 256;
 const indexed_validation_min_pairs: usize = 32;
 const MappingKeySet = std.HashMapUnmanaged(*const Node, void, MappingKeyContext, 80);
+const StringScalarKeySet = std.HashMapUnmanaged(*const Node, void, StringScalarKeyContext, 80);
+const StringScalarKeyValidation = enum { validated, fallback };
 
 /// Rejects mappings that contain duplicate keys after schema construction.
 pub fn validateUniqueMappingKeys(allocator: std.mem.Allocator, pairs: []const MappingPair) Error!void {
+    if (pairs.len >= indexed_validation_min_pairs and pairs.len <= std.math.maxInt(StringScalarKeySet.Size)) {
+        switch (try validateUniqueStringScalarMappingKeys(allocator, pairs)) {
+            .validated => return,
+            .fallback => {},
+        }
+    }
+
     if (pairs.len < indexed_validation_min_pairs or pairs.len > std.math.maxInt(MappingKeySet.Size)) {
         return validateUniqueMappingKeysLinear(pairs);
     }
@@ -34,6 +43,38 @@ pub fn validateUniqueMappingKeys(allocator: std.mem.Allocator, pairs: []const Ma
         const entry = try seen.getOrPut(allocator, pair.key);
         if (entry.found_existing) return ParseError.InvalidSyntax;
     }
+}
+
+fn validateUniqueStringScalarMappingKeys(allocator: std.mem.Allocator, pairs: []const MappingPair) Error!StringScalarKeyValidation {
+    var seen: StringScalarKeySet = .empty;
+    defer seen.deinit(allocator);
+    try seen.ensureTotalCapacity(allocator, @intCast(pairs.len));
+
+    for (pairs) |pair| {
+        if (!isStandardStringScalarMappingKey(pair.key)) return .fallback;
+        const entry = try seen.getOrPut(allocator, pair.key);
+        if (entry.found_existing) return ParseError.InvalidSyntax;
+    }
+
+    return .validated;
+}
+
+const StringScalarKeyContext = struct {
+    pub fn hash(_: @This(), node: *const Node) u64 {
+        return hashBytes(node.scalar.value);
+    }
+
+    pub fn eql(_: @This(), lhs: *const Node, rhs: *const Node) bool {
+        return std.mem.eql(u8, lhs.scalar.value, rhs.scalar.value);
+    }
+};
+
+fn isStandardStringScalarMappingKey(node: *const Node) bool {
+    return node.* == .scalar and isStandardMappingKeyTag(node.scalar.tag, "tag:yaml.org,2002:str");
+}
+
+fn isStandardMappingKeyTag(node_tag: ?[]const u8, standard_tag: []const u8) bool {
+    return std.mem.eql(u8, resolvedMappingKeyTag(node_tag, standard_tag), standard_tag);
 }
 
 fn validateUniqueMappingKeysLinear(pairs: []const MappingPair) ParseError!void {
@@ -250,6 +291,30 @@ test "loader duplicate key: keeps non-standard scalar tags distinct" {
     };
 
     try validateUniqueMappingKeys(std.testing.allocator, &pairs);
+}
+
+test "loader duplicate key: string scalar fast path validates standard keys" {
+    const first = Node{ .scalar = .{ .value = "first" } };
+    const second = Node{ .scalar = .{ .value = "second", .tag = "!" } };
+    const value_node = Node{ .scalar = .{ .value = "value" } };
+    const pairs = [_]MappingPair{
+        .{ .key = &first, .value = &value_node },
+        .{ .key = &second, .value = &value_node },
+    };
+
+    try std.testing.expectEqual(StringScalarKeyValidation.validated, try validateUniqueStringScalarMappingKeys(std.testing.allocator, &pairs));
+}
+
+test "loader duplicate key: string scalar fast path falls back for complex keys" {
+    const item = Node{ .scalar = .{ .value = "item" } };
+    const items = [_]*const Node{&item};
+    const sequence = Node{ .sequence = .{ .items = &items } };
+    const value_node = Node{ .scalar = .{ .value = "value" } };
+    const pairs = [_]MappingPair{
+        .{ .key = &sequence, .value = &value_node },
+    };
+
+    try std.testing.expectEqual(StringScalarKeyValidation.fallback, try validateUniqueStringScalarMappingKeys(std.testing.allocator, &pairs));
 }
 
 test "loader duplicate key: compares alias names" {

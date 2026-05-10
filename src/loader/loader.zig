@@ -66,19 +66,20 @@ pub fn loadStreamFromEventsWithFailure(
     max_document_count: ?usize,
     load_failure: ?*LoadFailure,
 ) Error![]const *const Node {
-    try limit.checkEvents(events, .{
+    const summary = limit.summarizeEvents(events);
+    try limit.checkSummary(summary, .{
         .max_alias_count = max_alias_count,
         .max_document_count = max_document_count,
     }, load_failure);
 
-    if (direct.supports(events)) {
-        return direct.loadStreamFromEvents(
+    if (!summary.has_aliases) {
+        return direct.loadStreamFromEventsWithSummary(
             allocator,
             events,
             selected_schema,
             duplicate_key_behavior,
             unknown_tag_behavior,
-            null,
+            summary,
             load_failure,
         );
     }
@@ -92,6 +93,7 @@ pub fn loadStreamFromEventsWithFailure(
         max_alias_count,
         max_alias_expansion,
         load_failure,
+        summary.has_aliases,
     );
 }
 
@@ -107,7 +109,8 @@ pub fn loadStreamFromEventsComposed(
     max_document_count: ?usize,
     load_failure: ?*LoadFailure,
 ) Error![]const *const Node {
-    try limit.checkEvents(events, .{
+    const summary = limit.summarizeEvents(events);
+    try limit.checkSummary(summary, .{
         .max_alias_count = max_alias_count,
         .max_document_count = max_document_count,
     }, load_failure);
@@ -121,6 +124,7 @@ pub fn loadStreamFromEventsComposed(
         max_alias_count,
         max_alias_expansion,
         load_failure,
+        summary.has_aliases,
     );
 }
 
@@ -133,6 +137,7 @@ fn loadStreamFromEventsComposedUnchecked(
     max_alias_count: ?usize,
     max_alias_expansion: ?usize,
     load_failure: ?*LoadFailure,
+    has_alias_events: bool,
 ) Error![]const *const Node {
     const graph_documents = composer.composeStream(allocator, events, .{
         .max_alias_count = max_alias_count,
@@ -154,15 +159,8 @@ fn loadStreamFromEventsComposedUnchecked(
         duplicate_key_behavior,
         unknown_tag_behavior,
         load_failure,
-        hasAliasEvents(events),
+        has_alias_events,
     );
-}
-
-fn hasAliasEvents(events: []const Event) bool {
-    for (events) |event_value| {
-        if (event_value == .alias) return true;
-    }
-    return false;
 }
 
 fn recordFailure(load_failure: ?*LoadFailure, failure_value: LoadFailure) void {

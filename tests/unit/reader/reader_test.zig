@@ -174,6 +174,11 @@ test "reader: rejects malformed UTF-32 input" {
     try std.testing.expectError(error.InvalidSyntax, prepare(std.testing.allocator, &[_]u8{ 0xff, 0xfe, 0x00, 0x00, 0x00, 0xd8, 0x00, 0x00 }));
 }
 
+test "reader: rejects non-printable decoded input" {
+    try std.testing.expectError(error.InvalidSyntax, prepare(std.testing.allocator, "bad\x01"));
+    try std.testing.expectError(error.InvalidSyntax, prepare(std.testing.allocator, &[_]u8{ 0xff, 0xfe, 'b', 0x00, 0x01, 0x00 }));
+}
+
 test "reader: advances through UTF-8 bytes with one-based locations" {
     var source = try prepare(std.testing.allocator, "a\nbc");
     defer source.deinit();

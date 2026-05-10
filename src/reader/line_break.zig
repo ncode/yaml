@@ -6,6 +6,8 @@
 
 const std = @import("std");
 
+pub const Error = error{InvalidSyntax} || std.mem.Allocator.Error;
+
 pub const NormalizedInput = struct {
     bytes: []const u8,
     owned: ?[]u8 = null,
@@ -20,55 +22,55 @@ pub const NormalizedInput = struct {
 /// YAML 1.2.2 line breaks are LF, CR, CRLF, NEL, LS, and PS. All non-LF
 /// variants are normalized to LF. The returned bytes borrow `input` when no
 /// normalization is needed.
-pub fn normalizeYamlLineBreaks(allocator: std.mem.Allocator, input: []const u8) std.mem.Allocator.Error!NormalizedInput {
-    if (!needsNormalization(input)) {
-        return .{ .bytes = input };
-    }
-
+pub fn normalizeYamlLineBreaks(allocator: std.mem.Allocator, input: []const u8) Error!NormalizedInput {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
-    try out.ensureTotalCapacity(allocator, input.len);
 
+    var normalized = false;
+    var copy_start: usize = 0;
     var index: usize = 0;
     while (index < input.len) {
-        if (input[index] == '\r') {
+        const len = std.unicode.utf8ByteSequenceLength(input[index]) catch return error.InvalidSyntax;
+        if (index + len > input.len) return error.InvalidSyntax;
+        const codepoint = std.unicode.utf8Decode(input[index .. index + len]) catch return error.InvalidSyntax;
+        if (!isYamlPrintableCodepoint(codepoint)) return error.InvalidSyntax;
+
+        const replacement_len: ?usize = switch (codepoint) {
+            '\r' => if (index + 1 < input.len and input[index + 1] == '\n') 2 else 1,
+            0x85, 0x2028, 0x2029 => len,
+            else => null,
+        };
+        if (replacement_len) |consumed| {
+            if (!normalized) {
+                try out.ensureTotalCapacity(allocator, input.len);
+                normalized = true;
+            }
+            try out.appendSlice(allocator, input[copy_start..index]);
             try out.append(allocator, '\n');
-            index += 1;
-            if (index < input.len and input[index] == '\n') index += 1;
+            index += consumed;
+            copy_start = index;
             continue;
         }
 
-        if (std.mem.startsWith(u8, input[index..], "\xc2\x85")) {
-            try out.append(allocator, '\n');
-            index += 2;
-            continue;
-        }
-
-        if (std.mem.startsWith(u8, input[index..], "\xe2\x80\xa8") or
-            std.mem.startsWith(u8, input[index..], "\xe2\x80\xa9"))
-        {
-            try out.append(allocator, '\n');
-            index += 3;
-            continue;
-        }
-
-        try out.append(allocator, input[index]);
-        index += 1;
+        index += len;
     }
 
+    if (!normalized) return .{ .bytes = input };
+
+    try out.appendSlice(allocator, input[copy_start..]);
     const owned = try out.toOwnedSlice(allocator);
     return .{ .bytes = owned, .owned = owned };
 }
 
-fn needsNormalization(input: []const u8) bool {
-    var index: usize = 0;
-    while (index < input.len) : (index += 1) {
-        if (input[index] == '\r') return true;
-        if (std.mem.startsWith(u8, input[index..], "\xc2\x85")) return true;
-        if (std.mem.startsWith(u8, input[index..], "\xe2\x80\xa8")) return true;
-        if (std.mem.startsWith(u8, input[index..], "\xe2\x80\xa9")) return true;
-    }
-    return false;
+fn isYamlPrintableCodepoint(codepoint: u21) bool {
+    return codepoint == 0x09 or
+        codepoint == 0x0a or
+        codepoint == 0x0d or
+        (codepoint >= 0x20 and codepoint <= 0x7e) or
+        codepoint == 0x85 or
+        (codepoint >= 0xa0 and codepoint <= 0xd7ff) or
+        (codepoint >= 0xe000 and codepoint <= 0xfffd) or
+        (codepoint >= 0x10000 and codepoint <= 0x10ffff);
 }
 
 test normalizeYamlLineBreaks {
@@ -92,6 +94,11 @@ test "normalizeYamlLineBreaks borrows input when no normalization is needed" {
 
 test "normalizeYamlLineBreaks cleans up after allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkNormalizeYamlLineBreaksAllocationFailure, .{});
+}
+
+test "normalizeYamlLineBreaks rejects malformed and non-printable UTF-8" {
+    try std.testing.expectError(error.InvalidSyntax, normalizeYamlLineBreaks(std.testing.allocator, "\xc3"));
+    try std.testing.expectError(error.InvalidSyntax, normalizeYamlLineBreaks(std.testing.allocator, "bad\x01"));
 }
 
 fn checkNormalizeYamlLineBreaksAllocationFailure(allocator: std.mem.Allocator) !void {

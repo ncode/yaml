@@ -7,6 +7,7 @@
 const std = @import("std");
 
 pub const composer = @import("compose/composer.zig");
+pub const load_api = @import("api/load.zig");
 pub const loader = @import("loader/loader.zig");
 pub const parser = @import("parser/api.zig");
 pub const reader = @import("reader/reader.zig");

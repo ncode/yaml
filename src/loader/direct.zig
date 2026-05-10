@@ -29,10 +29,7 @@ const UnknownTagBehavior = options.UnknownTagBehavior;
 
 /// Returns true when the direct loader supports the event stream shape.
 pub fn supports(events: []const Event) bool {
-    for (events) |event_value| {
-        if (event_value == .alias) return false;
-    }
-    return true;
+    return !limit.summarizeEvents(events).has_aliases;
 }
 
 /// Loads alias-free parser events directly into arena-owned public value roots.
@@ -45,9 +42,29 @@ pub fn loadStreamFromEvents(
     max_document_count: ?usize,
     load_failure: ?*LoadFailure,
 ) Error![]const *const Node {
-    try limit.checkEvents(events, .{ .max_document_count = max_document_count }, load_failure);
-    if (!supports(events)) return ParseError.Unsupported;
+    const summary = limit.summarizeEvents(events);
+    try limit.checkSummary(summary, .{ .max_document_count = max_document_count }, load_failure);
+    return loadStreamFromEventsWithSummary(
+        allocator,
+        events,
+        selected_schema,
+        duplicate_key_behavior,
+        unknown_tag_behavior,
+        summary,
+        load_failure,
+    );
+}
 
+pub fn loadStreamFromEventsWithSummary(
+    allocator: std.mem.Allocator,
+    events: []const Event,
+    selected_schema: Schema,
+    duplicate_key_behavior: DuplicateKeyBehavior,
+    unknown_tag_behavior: UnknownTagBehavior,
+    summary: limit.EventSummary,
+    load_failure: ?*LoadFailure,
+) Error![]const *const Node {
+    if (summary.has_aliases) return ParseError.Unsupported;
     var loader: DirectLoader = .{
         .allocator = allocator,
         .events = events,
@@ -55,6 +72,8 @@ pub fn loadStreamFromEvents(
         .duplicate_key_behavior = duplicate_key_behavior,
         .unknown_tag_behavior = unknown_tag_behavior,
         .failure = load_failure,
+        .document_count = summary.document_count,
+        .value_node_count = summary.value_node_count,
     };
     return loader.loadStream();
 }
@@ -66,18 +85,20 @@ const DirectLoader = struct {
     duplicate_key_behavior: DuplicateKeyBehavior,
     unknown_tag_behavior: UnknownTagBehavior,
     failure: ?*LoadFailure,
+    document_count: usize,
+    value_node_count: usize,
     index: usize = 0,
     nodes: NodePool = .{},
 
     fn loadStream(self: *DirectLoader) Error![]const *const Node {
-        self.nodes = try NodePool.init(self.allocator, countValueNodes(self.events));
+        self.nodes = try NodePool.init(self.allocator, self.value_node_count);
         errdefer self.nodes.deinit(self.allocator);
 
         try self.expectStreamStart();
 
         var documents: std.ArrayList(*const Node) = .empty;
         errdefer documents.deinit(self.allocator);
-        try documents.ensureTotalCapacity(self.allocator, countDocumentStarts(self.events));
+        try documents.ensureTotalCapacity(self.allocator, self.document_count);
 
         while (self.index < self.events.len and self.events[self.index] == .document_start) {
             self.index += 1;
@@ -297,23 +318,6 @@ fn isSetNullValue(node: *const Node) bool {
         .scalar => |scalar| schema.isCoreNullScalar(scalar.value, scalar.style == .plain, scalar.tag),
         else => false,
     };
-}
-
-fn countDocumentStarts(events: []const Event) usize {
-    var count: usize = 0;
-    for (events) |event_value| {
-        if (event_value == .document_start) count += 1;
-    }
-    return count;
-}
-
-fn countValueNodes(events: []const Event) usize {
-    var count: usize = 0;
-    for (events) |event_value| switch (event_value) {
-        .scalar, .sequence_start, .mapping_start => count += 1,
-        else => {},
-    };
-    return count;
 }
 
 fn countDirectCollectionNodes(events: []const Event, start: usize, mapping: bool) usize {

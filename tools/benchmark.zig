@@ -450,20 +450,26 @@ fn checksumLoadedInput(
     selected_schema: anytype,
     duplicate_key_behavior: anytype,
 ) !u64 {
-    var events = try parseEvents(allocator, input);
-    defer events.deinit();
+    if (require_single_document) {
+        var document = try yaml_internal.load_api.loadWithOptions(allocator, input, .{
+            .schema = selected_schema,
+            .duplicate_key_behavior = duplicate_key_behavior,
+        });
+        defer document.deinit();
+        return 1 +% checksumNode(document.root);
+    } else {
+        var stream = try yaml_internal.load_api.loadStreamWithOptions(allocator, input, .{
+            .schema = selected_schema,
+            .duplicate_key_behavior = duplicate_key_behavior,
+        });
+        defer stream.deinit();
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const documents = try yaml_internal.loader.loadStreamFromEvents(arena.allocator(), events.events, selected_schema, duplicate_key_behavior, .preserve, null, null, null);
-    if (require_single_document and documents.len != 1) return error.InvalidSyntax;
-
-    var checksum: u64 = documents.len;
-    for (documents) |document| {
-        checksum +%= checksumNode(document);
+        var checksum: u64 = stream.documents.len;
+        for (stream.documents) |document| {
+            checksum +%= checksumNode(document);
+        }
+        return checksum;
     }
-    return checksum;
 }
 
 fn checksumScanner(stream: yaml_internal.scanner.TokenStream) u64 {

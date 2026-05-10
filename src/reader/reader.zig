@@ -51,8 +51,6 @@ pub fn prepare(allocator: std.mem.Allocator, input: []const u8) Error!Source {
 
     const arena_allocator = arena.allocator();
     const decoded = try encoding.decodeInputBytes(arena_allocator, input);
-    if (!std.unicode.utf8ValidateSlice(decoded.bytes)) return error.InvalidSyntax;
-
     const normalized = try encoding.normalizeYamlLineBreaks(arena_allocator, decoded.bytes);
     return .{
         .arena = arena,

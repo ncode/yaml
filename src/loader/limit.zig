@@ -20,29 +20,48 @@ pub const Options = struct {
     max_document_count: ?usize = null,
 };
 
+pub const EventSummary = struct {
+    document_count: usize = 0,
+    alias_count: usize = 0,
+    has_aliases: bool = false,
+    value_node_count: usize = 0,
+};
+
+pub fn summarizeEvents(events: []const Event) EventSummary {
+    var summary: EventSummary = .{};
+    for (events) |yaml_event| {
+        switch (yaml_event) {
+            .document_start => summary.document_count += 1,
+            .alias => {
+                summary.alias_count += 1;
+                summary.has_aliases = true;
+            },
+            .scalar, .sequence_start, .mapping_start => summary.value_node_count += 1,
+            else => {},
+        }
+    }
+    return summary;
+}
+
 /// Checks event-stream limits before the composer allocates representation nodes.
 pub fn checkEvents(events: []const Event, options: Options, load_failure: ?*LoadFailure) Error!void {
+    return checkSummary(summarizeEvents(events), options, load_failure);
+}
+
+pub fn checkSummary(summary: EventSummary, options: Options, load_failure: ?*LoadFailure) Error!void {
     if (options.max_document_count) |limit| {
-        if (countEvents(events, .document_start) > limit) {
+        if (summary.document_count > limit) {
             recordFailure(load_failure, .document_count_limit);
             return ParseError.Unsupported;
         }
     }
 
     if (options.max_alias_count) |limit| {
-        if (countEvents(events, .alias) > limit) {
+        if (summary.alias_count > limit) {
             recordFailure(load_failure, .alias_count_limit);
             return ParseError.Unsupported;
         }
     }
-}
-
-fn countEvents(events: []const Event, comptime tag: std.meta.Tag(Event)) usize {
-    var count: usize = 0;
-    for (events) |yaml_event| {
-        if (yaml_event == tag) count += 1;
-    }
-    return count;
 }
 
 fn recordFailure(load_failure: ?*LoadFailure, failure_value: LoadFailure) void {
@@ -97,6 +116,35 @@ test "loader limit: accepts counts exactly at configured limits" {
         .max_alias_count = 1,
     }, &load_failure);
     try std.testing.expectEqual(LoadFailure.unknown, load_failure);
+}
+
+test "loader limit: summarizes event counts for loader preflight" {
+    const events = [_]Event{
+        .stream_start,
+        .{ .document_start = .{} },
+        .{ .mapping_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "self" } },
+        .{ .alias = "root" },
+        .mapping_end,
+        .{ .document_end = .{} },
+        .{ .document_start = .{} },
+        .{ .scalar = .{ .value = "two" } },
+        .{ .document_end = .{} },
+        .stream_end,
+    };
+
+    const summary = summarizeEvents(&events);
+    try std.testing.expectEqual(@as(usize, 2), summary.document_count);
+    try std.testing.expectEqual(@as(usize, 1), summary.alias_count);
+    try std.testing.expect(summary.has_aliases);
+    try std.testing.expectEqual(@as(usize, 3), summary.value_node_count);
+
+    var load_failure: LoadFailure = .unknown;
+    try std.testing.expectError(ParseError.Unsupported, checkSummary(summary, .{
+        .max_document_count = 1,
+        .max_alias_count = 0,
+    }, &load_failure));
+    try std.testing.expectEqual(LoadFailure.document_count_limit, load_failure);
 }
 
 test "loader limit: can reject without recording failure details" {
