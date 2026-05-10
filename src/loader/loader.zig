@@ -90,7 +90,15 @@ pub fn loadStreamFromEventsWithFailure(
         duplicate_key_behavior,
         unknown_tag_behavior,
         load_failure,
+        hasAliasEvents(events),
     );
+}
+
+fn hasAliasEvents(events: []const Event) bool {
+    for (events) |event_value| {
+        if (event_value == .alias) return true;
+    }
+    return false;
 }
 
 fn recordFailure(load_failure: ?*LoadFailure, failure_value: LoadFailure) void {

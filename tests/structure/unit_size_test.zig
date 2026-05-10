@@ -37,6 +37,7 @@ test "structure: unit regression tests stay split by feature" {
         .{ .path = "tests/unit/schema/schema_test.zig", .max_lines = 300 },
         .{ .path = "tests/unit/api/root_api_test.zig", .max_lines = 600 },
         .{ .path = "tests/unit/api/support.zig", .max_lines = 600 },
+        .{ .path = "tests/unit/api/load_string_ownership_test.zig", .max_lines = 180 },
         .{ .path = "tests/unit/api/load_test.zig", .max_lines = 900 },
         .{ .path = "tests/unit/api/tags_test.zig", .max_lines = 2000 },
         .{ .path = "tests/unit/api/emit_test.zig", .max_lines = 2700 },

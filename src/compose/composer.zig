@@ -10,16 +10,14 @@ const anchor_table = @import("anchor_table.zig");
 const diagnostic = @import("../common/diagnostic.zig");
 const event = @import("../parser/event.zig");
 const graph = @import("graph.zig");
+const node_pool = @import("../common/node_pool.zig");
 
 const Error = diagnostic.Error;
-
+const NodePool = node_pool.Pool(Node);
 pub const Event = event.Event;
-pub const MappingNode = graph.MappingNode;
 pub const MappingPair = graph.MappingPair;
 pub const Node = graph.Node;
 pub const ParseError = diagnostic.ParseError;
-pub const ScalarNode = graph.ScalarNode;
-pub const SequenceNode = graph.SequenceNode;
 
 /// Limits applied while composing parser events.
 pub const Options = struct {
@@ -34,9 +32,10 @@ pub const Options = struct {
 
 /// Composes a complete YAML event stream into representation graph roots.
 ///
-/// The caller owns returned nodes and strings through `allocator`. In public
-/// loading this allocator is the document arena, so partial graph allocations
-/// are cleaned up with the containing load operation on failure.
+/// The caller owns returned nodes and collection storage through `allocator`.
+/// Graph string slices borrow from `events`; the event stream must outlive the
+/// composed graph. Public loading copies strings during construction before
+/// releasing parser event storage.
 pub fn composeStream(allocator: std.mem.Allocator, events: []const Event, options: Options) Error![]const *const Node {
     var composer: Composer = .{
         .allocator = allocator,
@@ -55,12 +54,15 @@ const Composer = struct {
     document_count: usize = 0,
     anchors: anchor_table.AnchorTable = .{},
     complete_nodes: std.AutoHashMapUnmanaged(*const Node, void) = .empty,
+    nodes: NodePool = .{},
 
     fn composeStream(self: *Composer) Error![]const *const Node {
         self.alias_limiter = .{
             .max_alias_count = self.options.max_alias_count,
             .max_alias_expansion = self.options.max_alias_expansion,
         };
+        self.nodes = try NodePool.init(self.allocator, countGraphNodes(self.events));
+        errdefer self.nodes.deinit(self.allocator);
         defer self.complete_nodes.deinit(self.allocator);
         defer self.anchors.deinit(self.allocator);
 
@@ -106,23 +108,17 @@ const Composer = struct {
             .sequence_start => |collection| return self.composeSequence(collection),
             .mapping_start => |collection| return self.composeMapping(collection),
             .alias => |alias| return self.composeAlias(alias),
-            .stream_start,
-            .stream_end,
-            .document_start,
-            .document_end,
-            .sequence_end,
-            .mapping_end,
-            => return ParseError.InvalidSyntax,
+            else => return ParseError.InvalidSyntax,
         }
     }
 
     fn composeScalar(self: *Composer, scalar: event.Scalar) Error!*const Node {
-        const node = try self.allocator.create(Node);
+        const node = try self.nodes.create();
         node.* = .{ .scalar = .{
-            .value = try self.allocator.dupe(u8, scalar.value),
+            .value = scalar.value,
             .style = scalar.style,
-            .anchor = try copyOptionalSlice(self.allocator, scalar.anchor),
-            .tag = try copyOptionalSlice(self.allocator, scalar.tag),
+            .anchor = scalar.anchor,
+            .tag = scalar.tag,
         } };
         try self.rememberAnchor(node.scalar.anchor, node);
         try self.markComplete(node);
@@ -130,9 +126,9 @@ const Composer = struct {
     }
 
     fn composeSequence(self: *Composer, collection: event.CollectionStart) Error!*const Node {
-        const node = try self.allocator.create(Node);
-        const anchor = try copyOptionalSlice(self.allocator, collection.anchor);
-        const tag = try copyOptionalSlice(self.allocator, collection.tag);
+        const node = try self.nodes.create();
+        const anchor = collection.anchor;
+        const tag = collection.tag;
         try self.rememberAnchor(anchor, node);
 
         var items: std.ArrayList(*const Node) = .empty;
@@ -156,9 +152,9 @@ const Composer = struct {
     }
 
     fn composeMapping(self: *Composer, collection: event.CollectionStart) Error!*const Node {
-        const node = try self.allocator.create(Node);
-        const anchor = try copyOptionalSlice(self.allocator, collection.anchor);
-        const tag = try copyOptionalSlice(self.allocator, collection.tag);
+        const node = try self.nodes.create();
+        const anchor = collection.anchor;
+        const tag = collection.tag;
         try self.rememberAnchor(anchor, node);
 
         var pairs: std.ArrayList(MappingPair) = .empty;
@@ -199,6 +195,7 @@ const Composer = struct {
     }
 
     fn markComplete(self: *Composer, node: *const Node) std.mem.Allocator.Error!void {
+        if (self.options.max_alias_expansion == null) return;
         try self.complete_nodes.put(self.allocator, node, {});
     }
 
@@ -215,6 +212,15 @@ fn countDocumentStarts(events: []const Event) usize {
     for (events) |event_value| {
         if (event_value == .document_start) count += 1;
     }
+    return count;
+}
+
+fn countGraphNodes(events: []const Event) usize {
+    var count: usize = 0;
+    for (events) |event_value| switch (event_value) {
+        .scalar, .sequence_start, .mapping_start => count += 1,
+        else => {},
+    };
     return count;
 }
 
@@ -246,10 +252,6 @@ fn eventStartsNode(event_value: Event) bool {
         .scalar, .alias, .sequence_start, .mapping_start => true,
         else => false,
     };
-}
-
-fn copyOptionalSlice(allocator: std.mem.Allocator, value: ?[]const u8) std.mem.Allocator.Error!?[]const u8 {
-    return if (value) |slice| try allocator.dupe(u8, slice) else null;
 }
 
 test {

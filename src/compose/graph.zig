@@ -10,14 +10,17 @@ pub const CollectionStyle = event.CollectionStyle;
 pub const ScalarStyle = event.ScalarStyle;
 
 /// Untyped scalar node in the YAML representation graph.
+///
+/// String slices borrow from parser events; the graph must not outlive its
+/// source event stream.
 pub const ScalarNode = struct {
-    /// Decoded scalar value.
+    /// Decoded scalar value borrowed from the parser event stream.
     value: []const u8,
     /// Source presentation style.
     style: ScalarStyle = .plain,
-    /// Optional anchor name without the leading `&`.
+    /// Optional anchor name borrowed from the parser event stream.
     anchor: ?[]const u8 = null,
-    /// Optional resolved tag URI or local tag spelling.
+    /// Optional tag borrowed from the parser event stream.
     tag: ?[]const u8 = null,
 };
 
@@ -30,26 +33,32 @@ pub const MappingPair = struct {
 };
 
 /// Untyped sequence node in the YAML representation graph.
+///
+/// String slices borrow from parser events; the graph must not outlive its
+/// source event stream.
 pub const SequenceNode = struct {
     /// Sequence item nodes, in source order.
     items: []const *const Node,
     /// Source presentation style.
     style: CollectionStyle = .block,
-    /// Optional anchor name without the leading `&`.
+    /// Optional anchor name borrowed from the parser event stream.
     anchor: ?[]const u8 = null,
-    /// Optional resolved tag URI or local tag spelling.
+    /// Optional tag borrowed from the parser event stream.
     tag: ?[]const u8 = null,
 };
 
 /// Untyped mapping node in the YAML representation graph.
+///
+/// String slices borrow from parser events; the graph must not outlive its
+/// source event stream.
 pub const MappingNode = struct {
     /// Mapping pairs, in source order.
     pairs: []const MappingPair,
     /// Source presentation style.
     style: CollectionStyle = .block,
-    /// Optional anchor name without the leading `&`.
+    /// Optional anchor name borrowed from the parser event stream.
     anchor: ?[]const u8 = null,
-    /// Optional resolved tag URI or local tag spelling.
+    /// Optional tag borrowed from the parser event stream.
     tag: ?[]const u8 = null,
 };
 

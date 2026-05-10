@@ -9,6 +9,7 @@ const diagnostic = @import("../common/diagnostic.zig");
 const duplicate_key = @import("duplicate_key.zig");
 const failure = @import("failure.zig");
 const graph = @import("../compose/graph.zig");
+const node_pool = @import("../common/node_pool.zig");
 const options = @import("options.zig");
 const schema = @import("../schema/schema.zig");
 const tag = @import("../schema/tag.zig");
@@ -18,12 +19,15 @@ const DuplicateKeyBehavior = options.DuplicateKeyBehavior;
 const Error = diagnostic.Error;
 const MappingPair = value_model.MappingPair;
 const Node = value_model.Node;
+const NodePool = node_pool.Pool(Node);
 const Schema = schema.Schema;
 const UnknownTagBehavior = options.UnknownTagBehavior;
 
 pub const LoadFailure = failure.LoadFailure;
 
 /// Constructs public value-model document roots from composed graph roots.
+/// Public value strings are copied into `allocator` so loaded values outlive
+/// parser event storage.
 pub fn constructStream(
     allocator: std.mem.Allocator,
     documents: []const *const graph.Node,
@@ -38,11 +42,13 @@ pub fn constructStream(
         duplicate_key_behavior,
         unknown_tag_behavior,
         null,
+        true,
     );
 }
 
 /// Constructs public value-model document roots and records load-stage failure
-/// categories for diagnostics when construction fails.
+/// categories for diagnostics when construction fails. Public value strings are
+/// copied into `allocator` so loaded values outlive parser event storage.
 pub fn constructStreamWithFailure(
     allocator: std.mem.Allocator,
     documents: []const *const graph.Node,
@@ -50,6 +56,7 @@ pub fn constructStreamWithFailure(
     duplicate_key_behavior: DuplicateKeyBehavior,
     unknown_tag_behavior: UnknownTagBehavior,
     load_failure: ?*LoadFailure,
+    preserve_alias_identity: bool,
 ) Error![]const *const Node {
     var constructor: Constructor = .{
         .allocator = allocator,
@@ -57,6 +64,7 @@ pub fn constructStreamWithFailure(
         .duplicate_key_behavior = duplicate_key_behavior,
         .unknown_tag_behavior = unknown_tag_behavior,
         .failure = load_failure,
+        .preserve_alias_identity = preserve_alias_identity,
     };
     return constructor.constructStream(documents);
 }
@@ -67,28 +75,48 @@ const Constructor = struct {
     duplicate_key_behavior: DuplicateKeyBehavior,
     unknown_tag_behavior: UnknownTagBehavior,
     failure: ?*LoadFailure = null,
+    preserve_alias_identity: bool,
     constructed: std.AutoHashMapUnmanaged(*const graph.Node, *const Node) = .empty,
+    nodes: NodePool = .{},
 
     fn constructStream(self: *Constructor, documents: []const *const graph.Node) Error![]const *const Node {
-        defer self.constructed.deinit(self.allocator);
+        if (!self.preserve_alias_identity) {
+            self.nodes = try NodePool.init(self.allocator, countGraphDocumentNodes(documents));
+            errdefer self.nodes.deinit(self.allocator);
+        }
+        defer if (self.preserve_alias_identity) self.constructed.deinit(self.allocator);
 
         var loaded_documents: std.ArrayList(*const Node) = .empty;
         errdefer loaded_documents.deinit(self.allocator);
         try loaded_documents.ensureTotalCapacity(self.allocator, documents.len);
 
         for (documents) |document| {
-            try loaded_documents.append(self.allocator, try self.constructNode(document));
+            const node = if (self.preserve_alias_identity)
+                try self.constructNodeTracked(document)
+            else
+                try self.constructNodeUntracked(document);
+            try loaded_documents.append(self.allocator, node);
         }
 
         return loaded_documents.toOwnedSlice(self.allocator);
     }
 
-    fn constructNode(self: *Constructor, graph_node: *const graph.Node) Error!*const Node {
+    fn constructNodeTracked(self: *Constructor, graph_node: *const graph.Node) Error!*const Node {
         if (self.constructed.get(graph_node)) |node| return node;
 
         const node = try self.allocator.create(Node);
         try self.constructed.put(self.allocator, graph_node, node);
+        try self.constructNodeInto(node, graph_node, true);
+        return node;
+    }
 
+    fn constructNodeUntracked(self: *Constructor, graph_node: *const graph.Node) Error!*const Node {
+        const node = try self.nodes.create();
+        try self.constructNodeInto(node, graph_node, false);
+        return node;
+    }
+
+    fn constructNodeInto(self: *Constructor, node: *Node, graph_node: *const graph.Node, comptime track_identity: bool) Error!void {
         switch (graph_node.*) {
             .scalar => |scalar| {
                 try self.validateTag(scalar.tag, .scalar);
@@ -120,7 +148,10 @@ const Constructor = struct {
                 try items.ensureTotalCapacity(self.allocator, sequence.items.len);
 
                 for (sequence.items) |item| {
-                    try items.append(self.allocator, try self.constructNode(item));
+                    try items.append(self.allocator, if (track_identity)
+                        try self.constructNodeTracked(item)
+                    else
+                        try self.constructNodeUntracked(item));
                 }
 
                 const owned_items = try items.toOwnedSlice(self.allocator);
@@ -147,8 +178,14 @@ const Constructor = struct {
 
                 for (mapping.pairs) |pair| {
                     try pairs.append(self.allocator, .{
-                        .key = try self.constructNode(pair.key),
-                        .value = try self.constructNode(pair.value),
+                        .key = if (track_identity)
+                            try self.constructNodeTracked(pair.key)
+                        else
+                            try self.constructNodeUntracked(pair.key),
+                        .value = if (track_identity)
+                            try self.constructNodeTracked(pair.value)
+                        else
+                            try self.constructNodeUntracked(pair.value),
                     });
                 }
 
@@ -172,8 +209,6 @@ const Constructor = struct {
                 }
             },
         }
-
-        return node;
     }
 
     fn validateTag(self: *Constructor, node_tag: ?[]const u8, kind: tag.NodeKind) Error!void {
@@ -223,6 +258,39 @@ const Constructor = struct {
         }
     }
 };
+
+fn countGraphDocumentNodes(documents: []const *const graph.Node) usize {
+    var count: usize = 0;
+    for (documents) |document| {
+        count += countGraphNodes(document);
+    }
+    return count;
+}
+
+fn countGraphNodes(node: *const graph.Node) usize {
+    return switch (node.*) {
+        .scalar => 1,
+        .sequence => |sequence| countSequenceGraphNodes(sequence.items),
+        .mapping => |mapping| countMappingGraphNodes(mapping.pairs),
+    };
+}
+
+fn countSequenceGraphNodes(items: []const *const graph.Node) usize {
+    var count: usize = 1;
+    for (items) |item| {
+        count += countGraphNodes(item);
+    }
+    return count;
+}
+
+fn countMappingGraphNodes(pairs: []const graph.MappingPair) usize {
+    var count: usize = 1;
+    for (pairs) |pair| {
+        count += countGraphNodes(pair.key);
+        count += countGraphNodes(pair.value);
+    }
+    return count;
+}
 
 fn resolveSchemaScalar(
     allocator: std.mem.Allocator,

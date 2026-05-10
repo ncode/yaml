@@ -115,6 +115,7 @@ fn checkLoadAllocationFailure(failing_allocator: std.mem.Allocator) !void {
         "root:\n  nested: [one, two]\n",
         "---\n&root {alias: *root, tagged: !!str true}\n",
         "k00: v\nk01: v\nk02: v\nk03: v\nk04: v\nk05: v\nk06: v\nk07: v\nk08: v\nk09: v\nk10: v\nk11: v\nk12: v\nk13: v\nk14: v\nk15: v\nk16: v\nk17: v\nk18: v\nk19: v\nk20: v\nk21: v\nk22: v\nk23: v\nk24: v\nk25: v\nk26: v\nk27: v\nk28: v\nk29: v\nk30: v\nk31: v\nk32: v\n",
+        "[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]\n",
     };
 
     for (inputs) |input| {

@@ -74,12 +74,14 @@ pub fn build(b: *std.Build) void {
     };
     const focused_unit_roots = [_]FocusedUnitRoot{
         .{ .root_source_file = "tests/unit/api/root_api_test.zig", .imports = yaml_imports },
+        .{ .root_source_file = "tests/unit/api/load_string_ownership_test.zig", .imports = yaml_imports },
         .{ .root_source_file = "tests/unit/scanner/scanner_test.zig", .imports = yaml_imports },
         .{ .root_source_file = "tests/unit/reader/reader_test.zig", .imports = internal_imports },
         .{ .root_source_file = "tests/unit/api/parser_stream_test.zig", .imports = yaml_imports },
         .{ .root_source_file = "tests/unit/compose/composer_test.zig", .imports = internal_imports },
         .{ .root_source_file = "tests/unit/loader/loader_test.zig", .imports = internal_imports },
         .{ .root_source_file = "tests/unit/schema/schema_test.zig", .imports = internal_imports },
+        .{ .root_source_file = "tools/benchmark.zig", .imports = internal_imports },
     };
     var focused_unit_coverage_artifacts: [focused_unit_roots.len + 1]*std.Build.Step.Compile = undefined;
     for (focused_unit_roots, 0..) |unit_root, index| {

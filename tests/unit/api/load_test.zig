@@ -352,6 +352,27 @@ test "load preserves anchors on schema-resolved scalar aliases for dumping" {
     , emitted);
 }
 
+test "load keeps anchor-only scalars normal while aliases preserve identity" {
+    var anchored = try load(std.testing.allocator,
+        \\- &item value
+        \\
+    );
+    defer anchored.deinit();
+
+    try std.testing.expect(anchored.root.sequence.items[0].* == .scalar);
+    try std.testing.expectEqualStrings("value", anchored.root.sequence.items[0].scalar.value);
+    try std.testing.expectEqualStrings("item", anchored.root.sequence.items[0].scalar.anchor.?);
+
+    var aliased = try load(std.testing.allocator,
+        \\- &item value
+        \\- *item
+        \\
+    );
+    defer aliased.deinit();
+
+    try std.testing.expectEqual(aliased.root.sequence.items[0], aliased.root.sequence.items[1]);
+}
+
 test "load preserves tags on schema-resolved scalar aliases for dumping" {
     var document = try load(std.testing.allocator,
         \\answer: &answer !!int "42"

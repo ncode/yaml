@@ -182,8 +182,52 @@ fn buildFixtures(allocator: std.mem.Allocator) ![]Fixture {
         .input = try generateSequenceRecords(allocator, 200),
         .owned = true,
     });
+    try fixtures.append(allocator, .{
+        .name = "nested-flow",
+        .input = try generateNestedFlow(allocator, 128),
+        .owned = true,
+    });
+    try fixtures.append(allocator, .{
+        .name = "wide-mapping-large",
+        .input = try generateWideMapping(allocator, 1536),
+        .owned = true,
+    });
+    try fixtures.append(allocator, .{
+        .name = "sequence-records-large",
+        .input = try generateSequenceRecords(allocator, 512),
+        .owned = true,
+    });
+    try fixtures.append(allocator, .{
+        .name = "alias-heavy",
+        .input = try generateAliasHeavy(allocator, 256),
+        .owned = true,
+    });
+    try fixtures.append(allocator, .{
+        .name = "scalar-heavy",
+        .input = try generateScalarHeavy(allocator, 192),
+        .owned = true,
+    });
 
     return fixtures.toOwnedSlice(allocator);
+}
+
+test "benchmark fixtures include comparison-derived hot paths" {
+    const allocator = std.testing.allocator;
+    const fixtures = try buildFixtures(allocator);
+    defer deinitFixtures(allocator, fixtures);
+
+    try expectFixture(fixtures, "nested-flow");
+    try expectFixture(fixtures, "wide-mapping-large");
+    try expectFixture(fixtures, "sequence-records-large");
+    try expectFixture(fixtures, "alias-heavy");
+    try expectFixture(fixtures, "scalar-heavy");
+}
+
+fn expectFixture(fixtures: []const Fixture, name: []const u8) !void {
+    for (fixtures) |fixture| {
+        if (std.mem.eql(u8, fixture.name, name)) return;
+    }
+    return error.MissingFixture;
 }
 
 fn deinitFixtures(allocator: std.mem.Allocator, fixtures: []Fixture) void {
@@ -215,6 +259,62 @@ fn generateSequenceRecords(allocator: std.mem.Allocator, count: usize) ![]const 
             \\  score: {d}
             \\
         , .{ index, index, if (index % 2 == 0) "true" else "false", index * 3 });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn generateNestedFlow(allocator: std.mem.Allocator, count: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, count * 180);
+    try out.appendSlice(allocator, "root:\n");
+    for (0..count) |index| {
+        try out.print(allocator, "  node_{d}: {{id: {d}, meta: {{name: node-{d}, flags: [true, false, null], nested: {{a: value-{d}, b: [one, two, three]}}}}, edges: [{{to: node-{d}, weight: {d}}}, {{to: node-{d}, weight: {d}}}]}}\n", .{
+            index,
+            index,
+            index,
+            index,
+            (index + 1) % count,
+            index * 3,
+            (index + 2) % count,
+            index * 5,
+        });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn generateAliasHeavy(allocator: std.mem.Allocator, count: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, count * 56);
+    for (0..count) |index| {
+        try out.print(allocator,
+            \\- &a{d}
+            \\  id: {d}
+            \\  name: item-{d}
+            \\- *a{d}
+            \\
+        , .{ index, index, index, index });
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn generateScalarHeavy(allocator: std.mem.Allocator, count: usize) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.ensureTotalCapacity(allocator, count * 160);
+    try out.appendSlice(allocator, "scalars:\n");
+    for (0..count) |index| {
+        try out.print(allocator,
+            \\  item_{d}:
+            \\    plain: plain value {d} with spaces
+            \\    single: 'single ''quoted'' value {d}'
+            \\    double: "double value {d} with \\n newline and \\t tab"
+            \\    literal: |
+            \\      line {d}
+            \\      more scalar text {d}
+            \\
+        , .{ index, index, index, index, index, index });
     }
     return out.toOwnedSlice(allocator);
 }
@@ -267,11 +367,11 @@ fn reportAllocations(
 }
 
 fn iterationCount(input_len: usize, api_path: ApiPath) u64 {
-    const base: u64 = if (input_len < 512) 1024 else if (input_len < 4096) 256 else 64;
+    const base: u64 = if (input_len < 512) 1024 else if (input_len < 4096) 256 else if (input_len < 32768) 64 else 32;
     return switch (api_path) {
         .scanner => base * 2,
         .parser_events => base,
-        .load_default, .load_failsafe_allow, .load_stream_default => @max(16, base / 2),
+        .load_default, .load_failsafe_allow, .load_stream_default => @max(8, base / 2),
     };
 }
 
