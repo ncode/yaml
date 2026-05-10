@@ -9,16 +9,24 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Run inside Debian trixie to get a current kcov (v43). Ubuntu 22.04 ships v38
+    # and 24.04 dropped the package entirely. seccomp=unconfined is required so
+    # kcov can ptrace the test binaries.
+    container:
+      image: debian:trixie-slim
+      options: --security-opt seccomp=unconfined
     timeout-minutes: 45
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Install host tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y kcov valgrind
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            kcov valgrind \
+            git ca-certificates curl xz-utils
+
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Zig
         uses: mlugg/setup-zig@v2
