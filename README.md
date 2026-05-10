@@ -2,8 +2,7 @@
 
 A native Zig library for reading and writing YAML 1.2.2.
 
-This project is a reusable library, not a libyaml wrapper and not a CLI. It
-provides parser events, loaded value graphs, schema-aware scalar resolution, and
+It provides parser events, loaded value graphs, schema-aware scalar resolution, and
 YAML emission through allocating and writer-based APIs.
 
 ## Features
@@ -142,8 +141,7 @@ there.
 
 ## Scope And Non-Goals
 
-- Native Zig implementation only; this project does not wrap libyaml or another
-  YAML implementation.
+- Native Zig implementation only.
 - Library API only; it does not provide a command-line YAML tool.
 - Correctness and memory safety take priority over performance shortcuts.
 - YAML 1.2.2 conformance is tracked through the pinned test suite, not README
