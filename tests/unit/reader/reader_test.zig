@@ -70,6 +70,52 @@ test "reader: prepares decoded normalized source for scanner layers" {
     try std.testing.expectEqualStrings("a\nb", source.bytes);
 }
 
+test "reader: prepares printable ASCII LF source without copying" {
+    const input = "root:\n\tkey: value\nplain: !#$%&()*+,-./09:;<=>?@AZ[]^_`az{|}~\n";
+
+    var source = try prepare(std.testing.allocator, input);
+    defer source.deinit();
+
+    try std.testing.expectEqual(@intFromPtr(input.ptr), @intFromPtr(source.bytes.ptr));
+    try std.testing.expectEqualStrings(input, source.bytes);
+}
+
+test "reader: rejects invalid ASCII control bytes" {
+    const cases = [_][]const u8{
+        "bad\x00x",
+        "bad\x08",
+        "bad\x0b",
+        "bad\x0c",
+        "bad\x1f",
+        "bad\x7f",
+    };
+
+    for (cases) |input| {
+        try std.testing.expectError(error.InvalidSyntax, prepare(std.testing.allocator, input));
+    }
+}
+
+test "reader: normalizes CR and CRLF while preserving LF" {
+    var source = try prepare(std.testing.allocator, "one\r\ntwo\rthree\nfour");
+    defer source.deinit();
+
+    try std.testing.expectEqualStrings("one\ntwo\nthree\nfour", source.bytes);
+}
+
+test "reader: falls back for non-ASCII validation and line breaks" {
+    const non_ascii = "caf\xc3\xa9\nnext";
+    var valid = try prepare(std.testing.allocator, non_ascii);
+    defer valid.deinit();
+    try std.testing.expectEqual(@intFromPtr(non_ascii.ptr), @intFromPtr(valid.bytes.ptr));
+    try std.testing.expectEqualStrings(non_ascii, valid.bytes);
+
+    var normalized = try prepare(std.testing.allocator, "one\xc2\x85two");
+    defer normalized.deinit();
+    try std.testing.expectEqualStrings("one\ntwo", normalized.bytes);
+
+    try std.testing.expectError(error.InvalidSyntax, prepare(std.testing.allocator, "bad\xc3("));
+}
+
 test "reader: normalizes YAML non-ASCII line breaks" {
     var source = try prepare(std.testing.allocator, "one\xc2\x85two\xe2\x80\xa8three\xe2\x80\xa9four");
     defer source.deinit();

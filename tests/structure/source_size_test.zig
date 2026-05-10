@@ -116,6 +116,7 @@ test "structure: direct token parser is split into feature modules" {
         .{ .path = "src/parser/event.zig", .max_lines = 140 },
         .{ .path = "src/parser/block_sequence.zig", .max_lines = 1200 },
         .{ .path = "src/parser/block_mapping.zig", .max_lines = 1800 },
+        .{ .path = "src/parser/simple_fast_path.zig", .max_lines = 600 },
         .{ .path = "src/parser/document.zig", .max_lines = 600 },
         .{ .path = "src/parser/internal.zig", .max_lines = 1200 },
         .{ .path = "src/parser/scalar.zig", .max_lines = 1500 },

@@ -50,6 +50,7 @@ pub fn loadStreamFromEvents(
         max_alias_expansion,
         max_document_count,
         null,
+        true,
     );
 }
 
@@ -65,6 +66,7 @@ pub fn loadStreamFromEventsWithFailure(
     max_alias_expansion: ?usize,
     max_document_count: ?usize,
     load_failure: ?*LoadFailure,
+    copy_event_strings: bool,
 ) Error![]const *const Node {
     const summary = limit.summarizeEvents(events);
     try limit.checkSummary(summary, .{
@@ -73,7 +75,7 @@ pub fn loadStreamFromEventsWithFailure(
     }, load_failure);
 
     if (!summary.has_aliases) {
-        return direct.loadStreamFromEventsWithSummary(
+        return direct.loadStreamFromEventsWithStringPolicy(
             allocator,
             events,
             selected_schema,
@@ -81,6 +83,7 @@ pub fn loadStreamFromEventsWithFailure(
             unknown_tag_behavior,
             summary,
             load_failure,
+            copy_event_strings,
         );
     }
 

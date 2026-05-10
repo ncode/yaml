@@ -16,6 +16,7 @@ const token_cursor = internal;
 const block_sequence = @import("block_sequence.zig");
 const block_mapping = @import("block_mapping.zig");
 const common_limit = @import("../common/limit.zig");
+const simple_fast_path = @import("simple_fast_path.zig");
 
 pub const Error = types.Error;
 pub const Event = types.Event;
@@ -261,6 +262,11 @@ pub fn parseTokensWithStats(allocator: std.mem.Allocator, tokens: []const scanne
     }
 
     if (shouldTryRootClass(root_class, .block_sequence)) {
+        if (try simple_fast_path.appendBlockSequenceDocumentEvents(arena_allocator, tokens, &events)) {
+            try events.append(arena_allocator, .stream_end);
+            return finishEventStream(&arena, arena_allocator, &events);
+        }
+
         if (try parsePlainBlockSequenceDocumentTokens(arena_allocator, tokens)) |sequence| {
             try events.append(arena_allocator, .{ .document_start = .{
                 .explicit = sequence.explicit_start,
@@ -287,6 +293,11 @@ pub fn parseTokensWithStats(allocator: std.mem.Allocator, tokens: []const scanne
     }
 
     if (shouldTryRootClass(root_class, .block_mapping)) {
+        if (try simple_fast_path.appendBlockMappingDocumentEvents(arena_allocator, tokens, &events)) {
+            try events.append(arena_allocator, .stream_end);
+            return finishEventStream(&arena, arena_allocator, &events);
+        }
+
         if (try parsePlainBlockMappingDocumentTokens(arena_allocator, tokens)) |mapping| {
             try events.append(arena_allocator, .{ .document_start = .{
                 .explicit = mapping.explicit_start,

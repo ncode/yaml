@@ -23,6 +23,15 @@ pub const NormalizedInput = struct {
 /// variants are normalized to LF. The returned bytes borrow `input` when no
 /// normalization is needed.
 pub fn normalizeYamlLineBreaks(allocator: std.mem.Allocator, input: []const u8) Error!NormalizedInput {
+    var ascii_index: usize = 0;
+    while (ascii_index < input.len) : (ascii_index += 1) {
+        const byte = input[ascii_index];
+        if (byte == '\n' or byte == '\t' or (byte >= 0x20 and byte <= 0x7e)) continue;
+        if (byte < 0x80 and byte != '\r') return error.InvalidSyntax;
+        break;
+    }
+    if (ascii_index == input.len) return .{ .bytes = input };
+
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 

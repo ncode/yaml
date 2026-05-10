@@ -84,6 +84,7 @@ pub fn loadStreamWithOptions(allocator: std.mem.Allocator, input: []const u8, op
         options.max_alias_expansion,
         options.max_document_count,
         &load_failure,
+        true,
     ) catch |err| {
         if (options.diagnostic) |diagnostic| {
             if (diagnostic.message.len == 0) {
@@ -115,11 +116,6 @@ fn loadStreamFastPath(allocator: std.mem.Allocator, input: []const u8, options: 
         .diagnostic = options.diagnostic,
     });
 
-    if (!loader.direct.supports(event_stream.events)) {
-        arena.deinit();
-        return null;
-    }
-
     var load_failure: loader.LoadFailure = .unknown;
     const documents = loader.loadStreamFromEventsWithFailure(
         arena_allocator,
@@ -131,6 +127,7 @@ fn loadStreamFastPath(allocator: std.mem.Allocator, input: []const u8, options: 
         options.max_alias_expansion,
         options.max_document_count,
         &load_failure,
+        false,
     ) catch |err| {
         if (options.diagnostic) |diagnostic| {
             if (diagnostic.message.len == 0) {

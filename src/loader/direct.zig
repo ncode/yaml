@@ -64,6 +64,50 @@ pub fn loadStreamFromEventsWithSummary(
     summary: limit.EventSummary,
     load_failure: ?*LoadFailure,
 ) Error![]const *const Node {
+    return loadStreamFromEventsWithStringPolicy(
+        allocator,
+        events,
+        selected_schema,
+        duplicate_key_behavior,
+        unknown_tag_behavior,
+        summary,
+        load_failure,
+        true,
+    );
+}
+
+/// Loads events whose string payloads already live as long as `allocator`.
+pub fn loadStreamFromEventsBorrowingStringsWithSummary(
+    allocator: std.mem.Allocator,
+    events: []const Event,
+    selected_schema: Schema,
+    duplicate_key_behavior: DuplicateKeyBehavior,
+    unknown_tag_behavior: UnknownTagBehavior,
+    summary: limit.EventSummary,
+    load_failure: ?*LoadFailure,
+) Error![]const *const Node {
+    return loadStreamFromEventsWithStringPolicy(
+        allocator,
+        events,
+        selected_schema,
+        duplicate_key_behavior,
+        unknown_tag_behavior,
+        summary,
+        load_failure,
+        false,
+    );
+}
+
+pub fn loadStreamFromEventsWithStringPolicy(
+    allocator: std.mem.Allocator,
+    events: []const Event,
+    selected_schema: Schema,
+    duplicate_key_behavior: DuplicateKeyBehavior,
+    unknown_tag_behavior: UnknownTagBehavior,
+    summary: limit.EventSummary,
+    load_failure: ?*LoadFailure,
+    copy_strings: bool,
+) Error![]const *const Node {
     if (summary.has_aliases) return ParseError.Unsupported;
     var loader: DirectLoader = .{
         .allocator = allocator,
@@ -74,6 +118,7 @@ pub fn loadStreamFromEventsWithSummary(
         .failure = load_failure,
         .document_count = summary.document_count,
         .value_node_count = summary.value_node_count,
+        .copy_strings = copy_strings,
     };
     return loader.loadStream();
 }
@@ -87,6 +132,7 @@ const DirectLoader = struct {
     failure: ?*LoadFailure,
     document_count: usize,
     value_node_count: usize,
+    copy_strings: bool,
     index: usize = 0,
     nodes: NodePool = .{},
 
@@ -150,14 +196,14 @@ const DirectLoader = struct {
             return err;
         };
 
-        node.* = (resolveSchemaScalar(self.allocator, self.schema, scalar) catch |err| {
+        node.* = (self.resolveSchemaScalar(scalar) catch |err| {
             self.recordFailure(.invalid_scalar_tag);
             return err;
         }) orelse .{ .scalar = .{
-            .value = try self.allocator.dupe(u8, scalar.value),
+            .value = try self.retainSlice(scalar.value),
             .style = scalar.style,
-            .anchor = try copyOptionalSlice(self.allocator, scalar.anchor),
-            .tag = try copyOptionalSlice(self.allocator, scalar.tag),
+            .anchor = try self.retainOptionalSlice(scalar.anchor),
+            .tag = try self.retainOptionalSlice(scalar.tag),
         } };
         return node;
     }
@@ -180,8 +226,8 @@ const DirectLoader = struct {
         node.* = .{ .sequence = .{
             .items = owned_items,
             .style = collection.style,
-            .anchor = try copyOptionalSlice(self.allocator, collection.anchor),
-            .tag = try copyOptionalSlice(self.allocator, collection.tag),
+            .anchor = try self.retainOptionalSlice(collection.anchor),
+            .tag = try self.retainOptionalSlice(collection.tag),
         } };
         if (tag.isStandardOmapTag(collection.tag)) {
             duplicate_key.validateUniqueOrderedMapKeys(owned_items) catch |err| {
@@ -217,8 +263,8 @@ const DirectLoader = struct {
         node.* = .{ .mapping = .{
             .pairs = owned_pairs,
             .style = collection.style,
-            .anchor = try copyOptionalSlice(self.allocator, collection.anchor),
-            .tag = try copyOptionalSlice(self.allocator, collection.tag),
+            .anchor = try self.retainOptionalSlice(collection.anchor),
+            .tag = try self.retainOptionalSlice(collection.tag),
         } };
         if (tag.isStandardSetTag(collection.tag)) {
             try self.validateStandardSetContent(owned_pairs);
@@ -275,42 +321,46 @@ const DirectLoader = struct {
             if (target.* == .unknown) target.* = load_failure;
         }
     }
+
+    fn resolveSchemaScalar(self: *DirectLoader, scalar_value: parser_event.Scalar) Error!?Node {
+        const resolved = (try schema.resolveScalar(
+            self.schema,
+            scalar_value.value,
+            scalar_value.style == .plain,
+            scalar_value.tag,
+        )) orelse return null;
+
+        return switch (resolved) {
+            .null_value => .{ .null_value = .{
+                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
+                .tag = try self.retainOptionalSlice(scalar_value.tag),
+            } },
+            .bool_value => |bool_value| .{ .bool_value = .{
+                .value = bool_value,
+                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
+                .tag = try self.retainOptionalSlice(scalar_value.tag),
+            } },
+            .int_value => |int_value| .{ .int_value = .{
+                .value = int_value,
+                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
+                .tag = try self.retainOptionalSlice(scalar_value.tag),
+            } },
+            .float_value => |float_value| .{ .float_value = .{
+                .value = float_value,
+                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
+                .tag = try self.retainOptionalSlice(scalar_value.tag),
+            } },
+        };
+    }
+
+    fn retainSlice(self: *DirectLoader, value: []const u8) std.mem.Allocator.Error![]const u8 {
+        return if (self.copy_strings) try self.allocator.dupe(u8, value) else value;
+    }
+
+    fn retainOptionalSlice(self: *DirectLoader, maybe_value: ?[]const u8) std.mem.Allocator.Error!?[]const u8 {
+        return if (maybe_value) |slice| try self.retainSlice(slice) else null;
+    }
 };
-
-fn resolveSchemaScalar(
-    allocator: std.mem.Allocator,
-    selected_schema: Schema,
-    scalar_value: parser_event.Scalar,
-) Error!?Node {
-    const resolved = (try schema.resolveScalar(
-        selected_schema,
-        scalar_value.value,
-        scalar_value.style == .plain,
-        scalar_value.tag,
-    )) orelse return null;
-
-    return switch (resolved) {
-        .null_value => .{ .null_value = .{
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-        .bool_value => |bool_value| .{ .bool_value = .{
-            .value = bool_value,
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-        .int_value => |int_value| .{ .int_value = .{
-            .value = int_value,
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-        .float_value => |float_value| .{ .float_value = .{
-            .value = float_value,
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-    };
-}
 
 fn isSetNullValue(node: *const Node) bool {
     return switch (node.*) {
@@ -348,10 +398,6 @@ fn eventStartsNode(event_value: Event) bool {
         .scalar, .sequence_start, .mapping_start => true,
         else => false,
     };
-}
-
-fn copyOptionalSlice(allocator: std.mem.Allocator, maybe_value: ?[]const u8) std.mem.Allocator.Error!?[]const u8 {
-    return if (maybe_value) |slice| try allocator.dupe(u8, slice) else null;
 }
 
 test {

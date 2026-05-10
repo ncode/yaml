@@ -7,12 +7,11 @@
 const support = @import("support.zig");
 
 const std = support.std;
-const load = support.load;
-const loadStreamWithOptions = support.loadStreamWithOptions;
 const expectScalarString = support.expectScalarString;
+const loadStreamWithOptions = support.loadStreamWithOptions;
 
 test "load preserves decoded scalar text with tags anchors and aliases" {
-    var document = try load(std.testing.allocator,
+    var document = try support.load(std.testing.allocator,
         \\single: 'single ''quoted'' value'
         \\double: "escaped\nline and \t tab"
         \\literal: |
@@ -21,7 +20,6 @@ test "load preserves decoded scalar text with tags anchors and aliases" {
         \\tagged: !<tag:example.com,2000:tagged> tagged value
         \\anchored: &item "alias target"
         \\alias: *item
-        \\
     );
     defer document.deinit();
 
@@ -94,6 +92,53 @@ test "loadStreamWithOptions fast path owns strings after input is released" {
     try expectScalarString(value, "decoded\nvalue");
     try std.testing.expectEqualStrings("name", value.scalar.anchor.?);
     try std.testing.expectEqualStrings("tag:example.com,2000:name", value.scalar.tag.?);
+}
+
+test "loadStreamWithOptions fast path retains decoded normalized scalar metadata" {
+    const input = try utf16Le(std.testing.allocator, "!<tag:example.com,2000:map> &map\r\n" ++
+        "plain: plain value\r\n" ++
+        "single: 'single ''quoted'' value'\r\n" ++
+        "double: \"decoded\\nvalue\"\r\n" ++
+        "literal: |\r\n" ++
+        "  line one\r\n" ++
+        "  line two\r\n" ++
+        "tagged: !<tag:example.com,2000:tag> &tagged tagged value\r\n");
+
+    var stream = try loadStreamWithOptions(std.testing.allocator, input, .{});
+    defer stream.deinit();
+
+    @memset(input, 0xa5);
+    std.testing.allocator.free(input);
+
+    try std.testing.expectEqual(@as(usize, 1), stream.documents.len);
+    const root = stream.documents[0];
+    try std.testing.expect(root.* == .mapping);
+    try std.testing.expectEqualStrings("map", root.mapping.anchor.?);
+    try std.testing.expectEqualStrings("tag:example.com,2000:map", root.mapping.tag.?);
+    try std.testing.expectEqual(@as(usize, 5), root.mapping.pairs.len);
+
+    try expectScalarString(root.mapping.pairs[0].value, "plain value");
+    try expectScalarString(root.mapping.pairs[1].value, "single 'quoted' value");
+    try expectScalarString(root.mapping.pairs[2].value, "decoded\nvalue");
+    try expectScalarString(root.mapping.pairs[3].value, "line one\nline two\n");
+
+    const tagged = root.mapping.pairs[4].value;
+    try expectScalarString(tagged, "tagged value");
+    try std.testing.expectEqualStrings("tagged", tagged.scalar.anchor.?);
+    try std.testing.expectEqualStrings("tag:example.com,2000:tag", tagged.scalar.tag.?);
+}
+
+fn utf16Le(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    try out.ensureTotalCapacity(allocator, 2 + input.len * 2);
+    try out.appendSlice(allocator, &.{ 0xff, 0xfe });
+    for (input) |byte| {
+        try out.append(allocator, byte);
+        try out.append(allocator, 0);
+    }
+    return out.toOwnedSlice(allocator);
 }
 
 const PoisonOnFreeAllocator = struct {

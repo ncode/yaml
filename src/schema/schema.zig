@@ -94,8 +94,9 @@ fn resolveKnownJsonPlainScalar(value: []const u8) ?ResolvedScalar {
     if (std.mem.eql(u8, value, "true")) return .{ .bool_value = true };
     if (std.mem.eql(u8, value, "false")) return .{ .bool_value = false };
     if (mayBeJsonNumber(value)) {
-        if (scalars.int_scalar.parseJson(value)) |int_value| return .{ .int_value = int_value };
-        if (scalars.float_scalar.parseJson(value)) |float_value| return .{ .float_value = float_value };
+        if (hasJsonFloatMarker(value)) {
+            if (scalars.float_scalar.parseJson(value)) |float_value| return .{ .float_value = float_value };
+        } else if (scalars.int_scalar.parseJson(value)) |int_value| return .{ .int_value = int_value };
     }
     return null;
 }
@@ -105,8 +106,9 @@ fn resolveCorePlainScalar(value: []const u8) ?ResolvedScalar {
     if (scalars.null_scalar.isCoreValue(value)) return .null_value;
     if (scalars.bool_scalar.parseCore(value)) |bool_value| return .{ .bool_value = bool_value };
     if (mayBeCoreNumeric(value)) {
-        if (scalars.int_scalar.parseCore(value)) |int_value| return .{ .int_value = int_value };
-        if (scalars.float_scalar.parseCore(value, .implicit)) |float_value| return .{ .float_value = float_value };
+        if (hasCoreFloatMarker(value)) {
+            if (scalars.float_scalar.parseCore(value, .implicit)) |float_value| return .{ .float_value = float_value };
+        } else if (scalars.int_scalar.parseCore(value)) |int_value| return .{ .int_value = int_value };
     }
     return null;
 }
@@ -116,8 +118,9 @@ fn resolvesCorePlainScalar(value: []const u8) bool {
     if (scalars.null_scalar.isCoreValue(value)) return true;
     if (scalars.bool_scalar.parseCore(value) != null) return true;
     if (mayBeCoreNumeric(value)) {
-        if (scalars.int_scalar.parseCore(value) != null) return true;
-        if (scalars.float_scalar.parseCore(value, .implicit) != null) return true;
+        if (hasCoreFloatMarker(value)) {
+            if (scalars.float_scalar.parseCore(value, .implicit) != null) return true;
+        } else if (scalars.int_scalar.parseCore(value) != null) return true;
     }
     return false;
 }
@@ -130,6 +133,17 @@ fn mayBeJsonNumber(value: []const u8) bool {
 fn mayBeCoreNumeric(value: []const u8) bool {
     if (value.len == 0) return false;
     return value[0] == '+' or value[0] == '-' or value[0] == '.' or std.ascii.isDigit(value[0]);
+}
+
+fn hasJsonFloatMarker(value: []const u8) bool {
+    return std.mem.indexOfAny(u8, value, ".eE") != null;
+}
+
+fn hasCoreFloatMarker(value: []const u8) bool {
+    const offset: usize = if (value.len > 0 and (value[0] == '+' or value[0] == '-')) 1 else 0;
+    const unsigned = value[offset..];
+    if (std.mem.startsWith(u8, unsigned, "0x") or std.mem.startsWith(u8, unsigned, "0o")) return false;
+    return std.mem.indexOfAny(u8, unsigned, ".eE") != null;
 }
 
 /// Returns true when the scalar resolves to a core-schema null.

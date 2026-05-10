@@ -72,6 +72,55 @@ test "schema: core leaves YAML 1.1 boolean spellings as strings" {
     try std.testing.expect((try schema.resolveScalar(.core, "off", true, null)) == null);
 }
 
+test "schema: core leaves obvious non-reserved strings unresolved" {
+    const values = [_][]const u8{
+        "nullish",
+        "truefalse",
+        "FALSEhood",
+        "plain-123",
+        "version1.2",
+        ".nanx",
+        "+.infinity",
+        "-not-a-number",
+    };
+
+    for (values) |value| {
+        try std.testing.expect((try schema.resolveScalar(.core, value, true, null)) == null);
+        try std.testing.expect(!schema.resolvesAsCorePlainScalar(value));
+    }
+}
+
+test "schema: null bool and numeric boundaries remain exact" {
+    try std.testing.expectEqual(schema.ResolvedScalar.null_value, (try schema.resolveScalar(.core, "", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar.null_value, (try schema.resolveScalar(.core, "NULL", true, null)).?);
+    try std.testing.expect((try schema.resolveScalar(.core, "NULLS", true, null)) == null);
+
+    try std.testing.expectEqual(schema.ResolvedScalar{ .bool_value = true }, (try schema.resolveScalar(.core, "True", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar{ .bool_value = false }, (try schema.resolveScalar(.core, "false", true, null)).?);
+    try std.testing.expect((try schema.resolveScalar(.core, "false.", true, null)) == null);
+
+    try std.testing.expectEqual(schema.ResolvedScalar{ .int_value = 42 }, (try schema.resolveScalar(.core, "+42", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar{ .int_value = 0x1e3 }, (try schema.resolveScalar(.core, "0x1e3", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar{ .float_value = 1 }, (try schema.resolveScalar(.core, "1.", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar{ .float_value = 100 }, (try schema.resolveScalar(.core, "1.e2", true, null)).?);
+    try std.testing.expect((try schema.resolveScalar(.core, "+", true, null)) == null);
+    try std.testing.expect((try schema.resolveScalar(.core, "-", true, null)) == null);
+    try std.testing.expect((try schema.resolveScalar(.core, ".", true, null)) == null);
+    try std.testing.expect((try schema.resolveScalar(.core, "1e+", true, null)) == null);
+}
+
+test "schema: json reserved spellings and number boundaries remain exact" {
+    try std.testing.expectError(error.InvalidSyntax, schema.resolveScalar(.json, "nullish", true, null));
+    try std.testing.expectError(error.InvalidSyntax, schema.resolveScalar(.json, "truefalse", true, null));
+    try std.testing.expectError(error.InvalidSyntax, schema.resolveScalar(.json, "-", true, null));
+    try std.testing.expectError(error.InvalidSyntax, schema.resolveScalar(.json, "1e+", true, null));
+
+    try std.testing.expectEqual(schema.ResolvedScalar.null_value, (try schema.resolveScalar(.json, "null", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar{ .bool_value = false }, (try schema.resolveScalar(.json, "false", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar{ .int_value = 0 }, (try schema.resolveScalar(.json, "-0", true, null)).?);
+    try std.testing.expectEqual(schema.ResolvedScalar{ .float_value = 1 }, (try schema.resolveScalar(.json, "1.", true, null)).?);
+}
+
 test "schema: explicit standard tags resolve non-plain scalars" {
     try std.testing.expectEqual(schema.ResolvedScalar.null_value, (try schema.resolveScalar(.failsafe, "", false, "tag:yaml.org,2002:null")).?);
     try std.testing.expectEqual(schema.ResolvedScalar{ .bool_value = false }, (try schema.resolveScalar(.failsafe, "False", false, "tag:yaml.org,2002:bool")).?);
