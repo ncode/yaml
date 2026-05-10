@@ -8,6 +8,7 @@ const std = @import("std");
 const diagnostic = @import("../common/diagnostic.zig");
 const composer = @import("../compose/composer.zig");
 const construct = @import("construct.zig");
+pub const direct = @import("direct.zig");
 const parser_event = @import("../parser/event.zig");
 const failure = @import("failure.zig");
 const limit = @import("limit.zig");
@@ -18,7 +19,7 @@ const value_model = @import("../value/value.zig");
 const DuplicateKeyBehavior = options.DuplicateKeyBehavior;
 const Error = diagnostic.Error;
 const Event = parser_event.Event;
-const Node = value_model.Node;
+pub const Node = value_model.Node;
 const ParseError = diagnostic.ParseError;
 const Schema = schema.Schema;
 const UnknownTagBehavior = options.UnknownTagBehavior;
@@ -70,6 +71,69 @@ pub fn loadStreamFromEventsWithFailure(
         .max_document_count = max_document_count,
     }, load_failure);
 
+    if (direct.supports(events)) {
+        return direct.loadStreamFromEvents(
+            allocator,
+            events,
+            selected_schema,
+            duplicate_key_behavior,
+            unknown_tag_behavior,
+            null,
+            load_failure,
+        );
+    }
+
+    return loadStreamFromEventsComposedUnchecked(
+        allocator,
+        events,
+        selected_schema,
+        duplicate_key_behavior,
+        unknown_tag_behavior,
+        max_alias_count,
+        max_alias_expansion,
+        load_failure,
+    );
+}
+
+/// Loads events through the representation graph composer and constructor path.
+pub fn loadStreamFromEventsComposed(
+    allocator: std.mem.Allocator,
+    events: []const Event,
+    selected_schema: Schema,
+    duplicate_key_behavior: DuplicateKeyBehavior,
+    unknown_tag_behavior: UnknownTagBehavior,
+    max_alias_count: ?usize,
+    max_alias_expansion: ?usize,
+    max_document_count: ?usize,
+    load_failure: ?*LoadFailure,
+) Error![]const *const Node {
+    try limit.checkEvents(events, .{
+        .max_alias_count = max_alias_count,
+        .max_document_count = max_document_count,
+    }, load_failure);
+
+    return loadStreamFromEventsComposedUnchecked(
+        allocator,
+        events,
+        selected_schema,
+        duplicate_key_behavior,
+        unknown_tag_behavior,
+        max_alias_count,
+        max_alias_expansion,
+        load_failure,
+    );
+}
+
+fn loadStreamFromEventsComposedUnchecked(
+    allocator: std.mem.Allocator,
+    events: []const Event,
+    selected_schema: Schema,
+    duplicate_key_behavior: DuplicateKeyBehavior,
+    unknown_tag_behavior: UnknownTagBehavior,
+    max_alias_count: ?usize,
+    max_alias_expansion: ?usize,
+    load_failure: ?*LoadFailure,
+) Error![]const *const Node {
     const graph_documents = composer.composeStream(allocator, events, .{
         .max_alias_count = max_alias_count,
         .max_alias_expansion = max_alias_expansion,

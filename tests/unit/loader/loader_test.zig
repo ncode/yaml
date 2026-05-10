@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const internal = @import("yaml_internal");
-
 const Event = internal.types.Event;
 const loader = internal.loader;
 
@@ -99,6 +98,7 @@ test "loader: alias-free sequence batches value node allocation" {
     try std.testing.expectEqual(@as(usize, item_count), documents[0].sequence.items.len);
     try std.testing.expect(counted.allocations <= 6);
 }
+
 const CountingAllocator = struct {
     child: std.mem.Allocator,
     allocations: usize = 0,

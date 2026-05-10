@@ -80,6 +80,7 @@ pub fn build(b: *std.Build) void {
         .{ .root_source_file = "tests/unit/api/parser_stream_test.zig", .imports = yaml_imports },
         .{ .root_source_file = "tests/unit/compose/composer_test.zig", .imports = internal_imports },
         .{ .root_source_file = "tests/unit/loader/loader_test.zig", .imports = internal_imports },
+        .{ .root_source_file = "tests/unit/loader/direct_test.zig", .imports = internal_imports },
         .{ .root_source_file = "tests/unit/schema/schema_test.zig", .imports = internal_imports },
         .{ .root_source_file = "tools/benchmark.zig", .imports = internal_imports },
     };
