@@ -113,6 +113,42 @@ pub const parseCompactPlainBlockMappingNode = block_mapping.parseCompactPlainBlo
 pub const PlainMappingDocumentTokens = block_mapping.PlainMappingDocumentTokens;
 pub const parsePlainBlockMappingDocumentTokens = block_mapping.parsePlainBlockMappingDocumentTokens;
 pub const parseNestedPlainBlockMappingNode = block_mapping.parseNestedPlainBlockMappingNode;
+
+pub const DocumentRootClass = enum {
+    fallback,
+    empty,
+    scalar,
+    alias,
+    block_sequence,
+    block_mapping,
+    flow_sequence,
+    flow_mapping,
+};
+
+pub fn classifyDocumentRoot(tokens: []const scanner.Token) DocumentRootClass {
+    if (tokens.len < 2) return .fallback;
+    if (tokens[0] != .stream_start or tokens[tokens.len - 1] != .stream_end) return .fallback;
+
+    const end = tokens.len - 1;
+    var index: usize = 1;
+    skipComments(tokens, &index, end);
+    if (index == end) return .empty;
+    if (tokens[index] == .document_end) {
+        index += 1;
+        skipComments(tokens, &index, end);
+        return if (index == end) .empty else .fallback;
+    }
+    if (tokens[index] == .directive) return .fallback;
+
+    if (tokens[index] == .document_start) {
+        index += 1;
+        _ = consumeDocumentStartContent(tokens, &index, end);
+    }
+
+    if (hasStreamControl(tokens[index..end])) return .fallback;
+    return classifySingleDocumentRoot(tokens, index, end);
+}
+
 /// Parses scanner tokens into a YAML event stream.
 ///
 /// This is the public parser path. It handles stream/document framing, block
@@ -126,11 +162,15 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const scanner.Token) 
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
     const arena_allocator = arena.allocator();
+    const root_class = classifyDocumentRoot(tokens);
 
-    const parsed = parseScalarDocumentTokens(arena_allocator, tokens) catch |err| switch (err) {
-        ParseError.Unsupported => ScalarDocumentTokens{ .scalar = null },
-        else => return err,
-    };
+    const parsed = if (shouldTryRootClass(root_class, .scalar))
+        parseScalarDocumentTokens(arena_allocator, tokens) catch |err| switch (err) {
+            ParseError.Unsupported => ScalarDocumentTokens{ .scalar = null },
+            else => return err,
+        }
+    else
+        ScalarDocumentTokens{ .scalar = null };
 
     var events: std.ArrayList(Event) = .empty;
     try events.ensureTotalCapacity(arena_allocator, tokens.len);
@@ -167,116 +207,211 @@ pub fn parseTokens(allocator: std.mem.Allocator, tokens: []const scanner.Token) 
         return finishEventStream(&arena, arena_allocator, &events);
     }
 
-    if (try parseAliasDocumentTokens(arena_allocator, tokens)) |alias| {
-        try events.append(arena_allocator, .{ .document_start = .{
-            .explicit = alias.explicit_start,
-            .yaml_version = alias.directives.yaml_version,
-            .tag_directives = alias.directives.tag_directives,
-            .has_reserved_directive = alias.directives.has_reserved_directive,
-            .content_same_line = alias.content_same_line,
-            .content_same_line_separated_by_tab = alias.content_same_line_separated_by_tab,
-        } });
-        try events.append(arena_allocator, .{ .alias = alias.value });
-        try events.append(arena_allocator, .{ .document_end = .{ .explicit = alias.explicit_end } });
-        try events.append(arena_allocator, .stream_end);
-        return finishEventStream(&arena, arena_allocator, &events);
-    }
-
-    if (try appendImplicitDocumentStartSeparatedStreamEvents(arena_allocator, tokens, &events, appendSingleDocumentEvents)) {
-        try events.append(arena_allocator, .stream_end);
-        return finishEventStream(&arena, arena_allocator, &events);
-    }
-
-    if (try appendDocumentEndSeparatedStreamEvents(arena_allocator, tokens, &events, appendSingleDocumentEvents)) {
-        try events.append(arena_allocator, .stream_end);
-        return finishEventStream(&arena, arena_allocator, &events);
-    }
-
-    if (try appendExplicitDocumentStreamEvents(arena_allocator, tokens, &events, appendSingleDocumentEvents)) {
-        try events.append(arena_allocator, .stream_end);
-        return finishEventStream(&arena, arena_allocator, &events);
-    }
-
-    if (try parsePlainBlockSequenceDocumentTokens(arena_allocator, tokens)) |sequence| {
-        try events.append(arena_allocator, .{ .document_start = .{
-            .explicit = sequence.explicit_start,
-            .force_document_start = sequence.force_document_start,
-            .yaml_version = sequence.directives.yaml_version,
-            .tag_directives = sequence.directives.tag_directives,
-            .has_reserved_directive = sequence.directives.has_reserved_directive,
-            .content_same_line = sequence.content_same_line,
-            .content_same_line_separated_by_tab = sequence.content_same_line_separated_by_tab,
-        } });
-        try events.append(arena_allocator, .{ .sequence_start = .{
-            .style = .block,
-            .anchor = sequence.properties.anchor,
-            .tag = sequence.properties.tag,
-        } });
-        for (sequence.items) |item| {
-            try appendPlainBlockNodeEvent(arena_allocator, &events, item);
+    if (shouldTryRootClass(root_class, .alias)) {
+        if (try parseAliasDocumentTokens(arena_allocator, tokens)) |alias| {
+            try events.append(arena_allocator, .{ .document_start = .{
+                .explicit = alias.explicit_start,
+                .yaml_version = alias.directives.yaml_version,
+                .tag_directives = alias.directives.tag_directives,
+                .has_reserved_directive = alias.directives.has_reserved_directive,
+                .content_same_line = alias.content_same_line,
+                .content_same_line_separated_by_tab = alias.content_same_line_separated_by_tab,
+            } });
+            try events.append(arena_allocator, .{ .alias = alias.value });
+            try events.append(arena_allocator, .{ .document_end = .{ .explicit = alias.explicit_end } });
+            try events.append(arena_allocator, .stream_end);
+            return finishEventStream(&arena, arena_allocator, &events);
         }
-        try events.append(arena_allocator, .sequence_end);
-        try events.append(arena_allocator, .{ .document_end = .{ .explicit = sequence.explicit_end } });
+    }
+
+    if (root_class == .fallback and try appendImplicitDocumentStartSeparatedStreamEvents(arena_allocator, tokens, &events, appendSingleDocumentEvents)) {
         try events.append(arena_allocator, .stream_end);
         return finishEventStream(&arena, arena_allocator, &events);
     }
 
-    if (try parsePlainBlockMappingDocumentTokens(arena_allocator, tokens)) |mapping| {
-        try events.append(arena_allocator, .{ .document_start = .{
-            .explicit = mapping.explicit_start,
-            .force_document_start = mapping.force_document_start,
-            .yaml_version = mapping.directives.yaml_version,
-            .tag_directives = mapping.directives.tag_directives,
-            .has_reserved_directive = mapping.directives.has_reserved_directive,
-            .content_same_line = mapping.content_same_line,
-            .content_same_line_separated_by_tab = mapping.content_same_line_separated_by_tab,
-        } });
-        try events.append(arena_allocator, .{ .mapping_start = .{
-            .style = .block,
-            .anchor = mapping.properties.anchor,
-            .tag = mapping.properties.tag,
-        } });
-        for (mapping.pairs) |pair| {
-            try appendPlainBlockNodeEvent(arena_allocator, &events, pair.key);
-            try appendPlainBlockNodeEvent(arena_allocator, &events, pair.value);
+    if (root_class == .fallback and try appendDocumentEndSeparatedStreamEvents(arena_allocator, tokens, &events, appendSingleDocumentEvents)) {
+        try events.append(arena_allocator, .stream_end);
+        return finishEventStream(&arena, arena_allocator, &events);
+    }
+
+    if (root_class == .fallback and try appendExplicitDocumentStreamEvents(arena_allocator, tokens, &events, appendSingleDocumentEvents)) {
+        try events.append(arena_allocator, .stream_end);
+        return finishEventStream(&arena, arena_allocator, &events);
+    }
+
+    if (shouldTryRootClass(root_class, .block_sequence)) {
+        if (try parsePlainBlockSequenceDocumentTokens(arena_allocator, tokens)) |sequence| {
+            try events.append(arena_allocator, .{ .document_start = .{
+                .explicit = sequence.explicit_start,
+                .force_document_start = sequence.force_document_start,
+                .yaml_version = sequence.directives.yaml_version,
+                .tag_directives = sequence.directives.tag_directives,
+                .has_reserved_directive = sequence.directives.has_reserved_directive,
+                .content_same_line = sequence.content_same_line,
+                .content_same_line_separated_by_tab = sequence.content_same_line_separated_by_tab,
+            } });
+            try events.append(arena_allocator, .{ .sequence_start = .{
+                .style = .block,
+                .anchor = sequence.properties.anchor,
+                .tag = sequence.properties.tag,
+            } });
+            for (sequence.items) |item| {
+                try appendPlainBlockNodeEvent(arena_allocator, &events, item);
+            }
+            try events.append(arena_allocator, .sequence_end);
+            try events.append(arena_allocator, .{ .document_end = .{ .explicit = sequence.explicit_end } });
+            try events.append(arena_allocator, .stream_end);
+            return finishEventStream(&arena, arena_allocator, &events);
         }
-        try events.append(arena_allocator, .mapping_end);
-        try events.append(arena_allocator, .{ .document_end = .{ .explicit = mapping.explicit_end } });
-        try events.append(arena_allocator, .stream_end);
-        return finishEventStream(&arena, arena_allocator, &events);
     }
 
-    if (try parseFlowSequenceDocumentTokens(arena_allocator, tokens)) |sequence| {
-        try events.append(arena_allocator, .{ .document_start = .{
-            .explicit = sequence.explicit_start,
-            .yaml_version = sequence.directives.yaml_version,
-            .tag_directives = sequence.directives.tag_directives,
-            .has_reserved_directive = sequence.directives.has_reserved_directive,
-            .content_same_line = sequence.content_same_line,
-            .content_same_line_separated_by_tab = sequence.content_same_line_separated_by_tab,
-        } });
-        try events.appendSlice(arena_allocator, sequence.events);
-        try events.append(arena_allocator, .{ .document_end = .{ .explicit = sequence.explicit_end } });
-        try events.append(arena_allocator, .stream_end);
-        return finishEventStream(&arena, arena_allocator, &events);
+    if (shouldTryRootClass(root_class, .block_mapping)) {
+        if (try parsePlainBlockMappingDocumentTokens(arena_allocator, tokens)) |mapping| {
+            try events.append(arena_allocator, .{ .document_start = .{
+                .explicit = mapping.explicit_start,
+                .force_document_start = mapping.force_document_start,
+                .yaml_version = mapping.directives.yaml_version,
+                .tag_directives = mapping.directives.tag_directives,
+                .has_reserved_directive = mapping.directives.has_reserved_directive,
+                .content_same_line = mapping.content_same_line,
+                .content_same_line_separated_by_tab = mapping.content_same_line_separated_by_tab,
+            } });
+            try events.append(arena_allocator, .{ .mapping_start = .{
+                .style = .block,
+                .anchor = mapping.properties.anchor,
+                .tag = mapping.properties.tag,
+            } });
+            for (mapping.pairs) |pair| {
+                try appendPlainBlockNodeEvent(arena_allocator, &events, pair.key);
+                try appendPlainBlockNodeEvent(arena_allocator, &events, pair.value);
+            }
+            try events.append(arena_allocator, .mapping_end);
+            try events.append(arena_allocator, .{ .document_end = .{ .explicit = mapping.explicit_end } });
+            try events.append(arena_allocator, .stream_end);
+            return finishEventStream(&arena, arena_allocator, &events);
+        }
     }
 
-    if (try parseFlowMappingDocumentTokens(arena_allocator, tokens)) |mapping| {
-        try events.append(arena_allocator, .{ .document_start = .{
-            .explicit = mapping.explicit_start,
-            .yaml_version = mapping.directives.yaml_version,
-            .tag_directives = mapping.directives.tag_directives,
-            .has_reserved_directive = mapping.directives.has_reserved_directive,
-            .content_same_line = mapping.content_same_line,
-            .content_same_line_separated_by_tab = mapping.content_same_line_separated_by_tab,
-        } });
-        try events.appendSlice(arena_allocator, mapping.events);
-        try events.append(arena_allocator, .{ .document_end = .{ .explicit = mapping.explicit_end } });
-        try events.append(arena_allocator, .stream_end);
-        return finishEventStream(&arena, arena_allocator, &events);
+    if (shouldTryRootClass(root_class, .flow_sequence)) {
+        if (try parseFlowSequenceDocumentTokens(arena_allocator, tokens)) |sequence| {
+            try events.append(arena_allocator, .{ .document_start = .{
+                .explicit = sequence.explicit_start,
+                .yaml_version = sequence.directives.yaml_version,
+                .tag_directives = sequence.directives.tag_directives,
+                .has_reserved_directive = sequence.directives.has_reserved_directive,
+                .content_same_line = sequence.content_same_line,
+                .content_same_line_separated_by_tab = sequence.content_same_line_separated_by_tab,
+            } });
+            try events.appendSlice(arena_allocator, sequence.events);
+            try events.append(arena_allocator, .{ .document_end = .{ .explicit = sequence.explicit_end } });
+            try events.append(arena_allocator, .stream_end);
+            return finishEventStream(&arena, arena_allocator, &events);
+        }
+    }
+
+    if (shouldTryRootClass(root_class, .flow_mapping)) {
+        if (try parseFlowMappingDocumentTokens(arena_allocator, tokens)) |mapping| {
+            try events.append(arena_allocator, .{ .document_start = .{
+                .explicit = mapping.explicit_start,
+                .yaml_version = mapping.directives.yaml_version,
+                .tag_directives = mapping.directives.tag_directives,
+                .has_reserved_directive = mapping.directives.has_reserved_directive,
+                .content_same_line = mapping.content_same_line,
+                .content_same_line_separated_by_tab = mapping.content_same_line_separated_by_tab,
+            } });
+            try events.appendSlice(arena_allocator, mapping.events);
+            try events.append(arena_allocator, .{ .document_end = .{ .explicit = mapping.explicit_end } });
+            try events.append(arena_allocator, .stream_end);
+            return finishEventStream(&arena, arena_allocator, &events);
+        }
     }
 
     return ParseError.Unsupported;
+}
+
+fn hasStreamControl(tokens: []const scanner.Token) bool {
+    for (tokens) |token| {
+        switch (token) {
+            .directive, .document_start, .document_end => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn classifySingleDocumentRoot(tokens: []const scanner.Token, start: usize, end: usize) DocumentRootClass {
+    var index = start;
+    skipComments(tokens, &index, end);
+    if (index == end) return .empty;
+    if (tokens[index] == .indent) {
+        if (tokens[index].indent != 0) return .fallback;
+        index += 1;
+        skipComments(tokens, &index, end);
+        if (index == end) return .empty;
+    }
+
+    var saw_property = false;
+    while (index < end) {
+        switch (tokens[index]) {
+            .anchor, .tag => {
+                saw_property = true;
+                index += 1;
+                skipComments(tokens, &index, end);
+            },
+            else => break,
+        }
+    }
+    if (index == end) return .fallback;
+    if (saw_property and tokens[index] == .indent) return .fallback;
+
+    return switch (tokens[index]) {
+        .block_scalar => .scalar,
+        .scalar => if (scalarRootNeedsFallback(tokens, index, end)) .fallback else if (scalarTokenRunStartsBlockMappingKey(tokens, index, end)) .block_mapping else .scalar,
+        .alias => if (index + 1 < end and tokens[index + 1] == .block_mapping_value) .block_mapping else .alias,
+        .block_sequence_entry => .block_sequence,
+        .block_mapping_key, .block_mapping_value => .block_mapping,
+        .flow_sequence_start => if (flowRootCanBeBlockMappingKey(tokens, index, end)) .fallback else .flow_sequence,
+        .flow_mapping_start => if (flowRootCanBeBlockMappingKey(tokens, index, end)) .fallback else .flow_mapping,
+        else => .fallback,
+    };
+}
+
+fn scalarRootNeedsFallback(tokens: []const scanner.Token, start: usize, end: usize) bool {
+    var index = start;
+    while (index < end) : (index += 1) {
+        switch (tokens[index]) {
+            .scalar => |value| {
+                if (scalarTokenSpansLines(value)) return true;
+                if (index != start and !isPlainScalarContinuationToken(value)) return false;
+            },
+            .comment => {},
+            .indent => return true,
+            .block_mapping_value => return false,
+            else => return false,
+        }
+    }
+    return false;
+}
+
+fn flowRootCanBeBlockMappingKey(tokens: []const scanner.Token, start: usize, end: usize) bool {
+    var depth: usize = 0;
+    var index = start;
+    while (index < end) : (index += 1) {
+        switch (tokens[index]) {
+            .flow_sequence_start, .flow_mapping_start => depth += 1,
+            .flow_sequence_end, .flow_mapping_end => {
+                if (depth == 0) return false;
+                depth -= 1;
+                if (depth == 0) return index + 1 < end and tokens[index + 1] == .block_mapping_value;
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn shouldTryRootClass(actual: DocumentRootClass, expected: DocumentRootClass) bool {
+    return actual == .fallback or actual == expected;
 }
 
 fn appendSingleDocumentEvents(

@@ -13,6 +13,33 @@ const ParseError = support.ParseError;
 const parser = support.event_parser.parser;
 const types = support.types;
 
+fn expectRootClass(expected: parser.DocumentRootClass, input: []const u8) !void {
+    var token_stream = try scanner.scan(std.testing.allocator, input);
+    defer token_stream.deinit();
+
+    try std.testing.expectEqual(expected, parser.classifyDocumentRoot(token_stream.tokens));
+}
+
+test "classifyDocumentRoot conservatively identifies single-document roots" {
+    try expectRootClass(.scalar, "plain\n");
+    try expectRootClass(.scalar, "|\n  text\n");
+    try expectRootClass(.alias, "*anchor\n");
+    try expectRootClass(.flow_sequence, "[one, two]\n");
+    try expectRootClass(.flow_mapping, "{key: value}\n");
+    try expectRootClass(.block_sequence, "- one\n- two\n");
+    try expectRootClass(.block_mapping, "key: value\n");
+}
+
+test "classifyDocumentRoot falls back for ambiguous roots and streams" {
+    try expectRootClass(.fallback, "&anchor\n[one]\n");
+    try expectRootClass(.fallback, "%YAML 1.2\n---\nvalue\n");
+    try expectRootClass(.fallback,
+        \\--- one
+        \\--- two
+        \\
+    );
+}
+
 test "parseTokens parses a single plain scalar document" {
     var token_stream = try scanner.scan(std.testing.allocator, "plain\n");
     defer token_stream.deinit();

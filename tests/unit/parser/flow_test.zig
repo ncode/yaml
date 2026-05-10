@@ -1097,3 +1097,65 @@ test "parseTokens parses a trailing empty flow mapping value" {
     try std.testing.expect(event_stream.events[6] == .document_end);
     try std.testing.expect(event_stream.events[7] == .stream_end);
 }
+
+test "parseTokens does not overallocate temporary flow sequence entry events" {
+    const item_count = 96;
+
+    var input: std.ArrayList(u8) = .empty;
+    defer input.deinit(std.testing.allocator);
+    try input.append(std.testing.allocator, '[');
+    for (0..item_count) |index| {
+        if (index != 0) try input.appendSlice(std.testing.allocator, ", ");
+        try input.print(std.testing.allocator, "item_{d}", .{index});
+    }
+    try input.appendSlice(std.testing.allocator, "]\n");
+
+    var token_stream = try scanner.scan(std.testing.allocator, input.items);
+    defer token_stream.deinit();
+
+    var counted: CountingAllocator = .{ .child = std.testing.allocator };
+    var event_stream = try parseTokens(counted.allocator(), token_stream.tokens);
+    defer event_stream.deinit();
+
+    try std.testing.expectEqual(@as(usize, item_count + 6), event_stream.events.len);
+    try std.testing.expect(counted.allocated_bytes <= input.items.len * 256);
+}
+
+const CountingAllocator = struct {
+    child: std.mem.Allocator,
+    allocated_bytes: usize = 0,
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.child.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.allocated_bytes += len;
+        return result;
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        return self.child.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        return self.child.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(context));
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+};

@@ -190,7 +190,7 @@ fn appendSequenceEntryEvents(
 
     var key_events: std.ArrayList(Event) = .empty;
     defer key_events.deinit(allocator);
-    try key_events.ensureTotalCapacity(allocator, end - index.*);
+    try key_events.ensureTotalCapacity(allocator, @min(end - index.*, 4));
 
     const key_start = index.*;
     if (!try appendNodeEventsWithOptions(allocator, tokens, index, end, &key_events, depth, directives, .{

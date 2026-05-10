@@ -18,6 +18,7 @@ pub const NodeProperties = impl.NodeProperties;
 pub const TokenDirectives = impl.TokenDirectives;
 pub const PlainBlockNode = impl.PlainBlockNode;
 pub const PlainBlockPair = impl.PlainBlockPair;
+pub const DocumentRootClass = impl.DocumentRootClass;
 pub const ScalarDocumentTokens = impl.ScalarDocumentTokens;
 pub const appendCompactExplicitBlockMappingPair = impl.appendCompactExplicitBlockMappingPair;
 pub const appendPlainBlockNodeEvent = impl.appendPlainBlockNodeEvent;
@@ -103,6 +104,7 @@ pub const parseCompactPlainBlockMappingNode = impl.parseCompactPlainBlockMapping
 pub const PlainMappingDocumentTokens = impl.PlainMappingDocumentTokens;
 pub const parsePlainBlockMappingDocumentTokens = impl.parsePlainBlockMappingDocumentTokens;
 pub const parseNestedPlainBlockMappingNode = impl.parseNestedPlainBlockMappingNode;
+pub const classifyDocumentRoot = impl.classifyDocumentRoot;
 pub const parseTokens = impl.parseTokens;
 
 test {
