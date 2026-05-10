@@ -1,52 +1,151 @@
 # yaml
 
-A native Zig library for reading and writing YAML 1.2.2.
+Native Zig YAML 1.2.2 library.
 
-It provides parser events, loaded value graphs, schema-aware scalar resolution, and
-YAML emission through allocating and writer-based APIs.
+## Why This Library
 
-## Features
+- Pure Zig.
+- Passes the full official [`yaml/yaml-test-suite`](https://github.com/yaml/yaml-test-suite) at the pinned released tag, with **zero skips** (enforced by the build).
+- Caller-allocated and leak-free. Every owning type has a `deinit`; allocation failure is propagated, not hidden.
+- Memory-safe on malformed input: no panics, no `unreachable`, no UB. Limits return `error.Unsupported` with a diagnostic.
+- Structured diagnostics with byte offset and 1-based line/column for parser, loader, emitter, and typed-conversion failures.
+- Configurable schemas (failsafe, JSON, core), duplicate-key handling, unknown-tag handling, and safety limits across the pipeline.
 
-- UTF-8, UTF-16, and UTF-32 input with YAML line-break normalization.
-- Pull-style parsing with `Parser` and bulk event parsing with `parseEvents`.
-- Single-document loading with `load` and stream loading with `loadStream`.
-- Typed loading into caller-specified Zig structs, slices, enums, and scalars.
-- Failsafe, JSON, and core schema selection.
-- Configurable duplicate-key, unknown-tag, and safety-limit behavior.
-- Event emission and value dumping through allocating and `std.Io.Writer` APIs.
-- Diagnostics with byte offset and 1-based line/column for parser and loader failures.
+## Status
 
-## Quick Examples
+- Requires **Zig 0.16.0** or newer (enforced at build time).
+- **YAML 1.2.2 compliant.** The library passes every case in the vendored `yaml-test-suite` at the pinned released tag (currently `data-2022-01-17`, see `vendor/yaml-test-suite.PIN`). The skip list in `tests/conformance/skips.zig` is empty, and the build refuses to accept new skips against the pinned suite.
+- Run `zig build conformance-report` for current parser, loader, expected-error, and emitter coverage counts.
 
-Parse events:
+## Install
+
+Add the library as a dependency:
+
+```sh
+zig fetch --save git+https://github.com/ncode/yaml
+```
+
+Wire it into your `build.zig`:
+
+```zig
+const yaml = b.dependency("yaml", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+exe.root_module.addImport("yaml", yaml.module("yaml"));
+```
+
+Then import it from your Zig source:
+
+```zig
+const yaml = @import("yaml");
+```
+
+## Quick Start
 
 ```zig
 const std = @import("std");
 const yaml = @import("yaml");
 
-pub fn parseExample(allocator: std.mem.Allocator, input: []const u8) !void {
-    var events = try yaml.parseEvents(allocator, input);
-    defer events.deinit();
+pub fn main() !void {
+    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
-    for (events.events) |event| {
-        _ = event;
-    }
+    var document = try yaml.load(allocator, "name: yaml\nactive: true\n");
+    defer document.deinit();
+
+    const output = try yaml.dump(allocator, document.root);
+    defer allocator.free(output);
 }
 ```
 
-Load one document:
+## API Tour
+
+The public surface lives in `src/lib.zig`. Files below it are internal.
+
+### Events
+
+Pull-style with `Parser`, or bulk with `parseEvents`:
 
 ```zig
-var document = try yaml.load(allocator, "name: yaml\nactive: true\n");
-defer document.deinit();
+var parser = try yaml.Parser.init(allocator, input, .{});
+defer parser.deinit();
 
-switch (document.root.*) {
-    .mapping => |mapping| _ = mapping.pairs,
-    else => {},
+while (try parser.next()) |event| {
+    _ = event;
 }
+
+var events = try yaml.parseEvents(allocator, input);
+defer events.deinit();
 ```
 
-Use options and diagnostics:
+Events carry style, anchor, and tag metadata for stream, document, sequence, mapping, scalar, and alias nodes.
+
+### Documents
+
+```zig
+var document = try yaml.load(allocator, input);
+defer document.deinit();
+
+var stream = try yaml.loadStream(allocator, input);
+defer stream.deinit();
+```
+
+Loaded documents are arena-owned node graphs. Node variants include null, boolean, integer, float, scalar, sequence, mapping, and alias.
+
+### Typed Loading
+
+Load directly into Zig structs, slices, enums, scalars, optionals, and supported tagged unions:
+
+```zig
+const Config = struct {
+    name: []const u8,
+    ports: []const u16,
+    enabled: bool = true,
+};
+
+var parse_diagnostic: yaml.Diagnostic = .{};
+var typed_diagnostic: yaml.TypedDiagnostic = .{};
+
+var typed = try yaml.loadTypedWithOptions(Config, allocator, input, .{
+    .load = .{
+        .schema = .core,
+        .duplicate_key_behavior = .reject,
+        .diagnostic = &parse_diagnostic,
+    },
+    .conversion = .{
+        .field_name_transform = .snake_to_kebab,
+        .diagnostic = &typed_diagnostic,
+    },
+});
+defer typed.deinit();
+```
+
+`load` options control schema, duplicate keys, unknown tags, limits, and parser diagnostics. `conversion` options control typed-conversion behavior and diagnostics. `convertNode` is available when you already have a loaded `Node` graph.
+
+Conversion failures return typed errors such as `error.MissingField`, `error.TypeMismatch`, `error.LengthMismatch`, `error.AmbiguousField`, and `error.UnsupportedTargetType`.
+
+### Emission
+
+Allocating and writer-based variants for both events and value graphs:
+
+```zig
+const dumped = try yaml.dump(allocator, document.root);
+defer allocator.free(dumped);
+
+var buffer: [4096]u8 = undefined;
+var writer: std.Io.Writer = .fixed(&buffer);
+try yaml.dumpToWriter(allocator, &writer, document.root);
+
+const emitted = try yaml.emitEvents(allocator, events.events);
+defer allocator.free(emitted);
+```
+
+Emitter and dumper options control collection style preservation, `%TAG` directive preservation, redundant document-start omission, and output size limits.
+
+### Options And Diagnostics
 
 ```zig
 var diagnostic: yaml.Diagnostic = .{};
@@ -61,88 +160,80 @@ var document = try yaml.loadWithOptions(allocator, input, .{
 defer document.deinit();
 ```
 
-Load typed values:
+Schemas: `.failsafe`, `.json`, `.core`. Limits cover input size, token count, event count, scalar size, nesting depth, alias count, alias expansion, document count, and output size depending on the API layer. Diagnostic messages are library-owned static strings; do not free them.
+
+### Scanner
 
 ```zig
-const Config = struct {
-    name: []const u8,
-    ports: []const u16,
-};
-
-var typed = try yaml.loadTyped(Config, allocator,
-    \\name: service
-    \\ports: [80, 443]
-    \\
-);
-defer typed.deinit();
+var tokens = try yaml.scanner.scan(allocator, input);
+defer tokens.deinit();
 ```
 
-Emit YAML:
-
-```zig
-const output = try yaml.dump(allocator, document.root);
-defer allocator.free(output);
-
-var buffer: [4096]u8 = undefined;
-var writer: std.Io.Writer = .fixed(&buffer);
-try yaml.dumpToWriter(allocator, &writer, document.root);
-```
+The token stream owns its token array and any decoded or normalized source buffer.
 
 ## Build And Test
 
-Common commands:
+Primary commands:
 
 ```sh
 zig build
 zig build test
-zig build test-unit
-zig build test-conformance
-zig build conformance-report
-zig build coverage
-zig build docs
 ```
 
-Focused checks are also available for structure, schema, stress, allocation,
-leak, Valgrind, and direct conformance testing:
+Focused targets:
 
 ```sh
+zig build test-unit
+zig build test-conformance
+zig build test-direct-conformance
 zig build test-structure
 zig build test-schema
 zig build test-stress
 zig build test-allocation
 zig build test-leaks
 zig build test-valgrind
-zig build test-direct-conformance
+zig build coverage
+zig build docs
 ```
 
-## Validation
+Tools:
 
-The conformance harness validates behavior against the vendored pinned
-`yaml/yaml-test-suite` release under `vendor/yaml-test-suite/`. The exact
-repository, tag, and commit are recorded in `vendor/yaml-test-suite.PIN`.
+```sh
+zig build benchmark            # parser/loader micro-benchmarks
+zig build conformance-report   # current yaml-test-suite coverage counts
+zig build libfyaml-compare     # cross-check suite behavior against libfyaml fy-tool
+```
 
-Run `zig build conformance-report` to generate current parser, loader,
-expected-error, and emitter coverage for the configured pinned suite. The README
-intentionally does not copy snapshot counts or percentages; the build target is
-the source for current metrics.
+`libfyaml-compare` requires `python3` and an `fy-tool` executable; supply one with `-Dlibfyaml-fy-tool=/path/to/fy-tool` or have `fy-tool` on `PATH`.
 
-Use `-Dyaml-test-suite-dir=/path/to/yaml-test-suite-data` with conformance build
-steps to check another generated suite data directory without replacing the
-vendored pin.
+## Conformance
+
+The conformance harness validates behavior against the vendored pinned `yaml/yaml-test-suite` release under `vendor/yaml-test-suite/`. The exact repository, tag, and commit are recorded in `vendor/yaml-test-suite.PIN`.
+
+`zig build conformance-report` is the source of truth for current parser, loader, expected-error, and emitter coverage. The README intentionally does not copy snapshot counts.
+
+To run conformance against a different generated suite data directory without replacing the vendored pin:
+
+```sh
+zig build test-conformance -Dyaml-test-suite-dir=/path/to/yaml-test-suite-data
+```
 
 ## Documentation
 
 - `docs/api.md`: public API examples, options, diagnostics, and ownership details.
 - `docs/architecture.md`: processing pipeline and dependency direction.
 - `docs/memory.md`: allocator, borrowing, cleanup, error, and limit contracts.
+- `AGENTS.md`: contributor-facing project rules, file-size targets, and TDD workflow.
 
-The package root is `src/lib.zig`; files below it are internal unless re-exported
-there.
+The package root is `src/lib.zig`; files below it are internal unless re-exported there.
 
 ## Scope And Non-Goals
 
 - Native Zig implementation only.
-- Library API only; it does not provide a command-line YAML tool.
+- Library API only; no command-line YAML tool.
 - Correctness and memory safety take priority over performance shortcuts.
-- YAML 1.2.2 conformance is tracked through the pinned test suite, not README
-  status snapshots.
+- YAML 1.2.2 conformance is tracked through the pinned test suite, not README status snapshots.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
