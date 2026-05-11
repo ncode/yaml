@@ -126,6 +126,10 @@ fn tryStrictSimpleLoadStream(allocator: std.mem.Allocator, input: []const u8, op
         }
     }
 
+    if (try trySourceLineLoadStreamAfterInputLimit(allocator, input, options)) |loaded_stream| {
+        return loaded_stream;
+    }
+
     if (!mayBeStrictSimpleInput(input)) return null;
 
     var token_stream = scanner.scan(allocator, input) catch |err| switch (err) {
@@ -172,6 +176,258 @@ fn tryStrictSimpleLoadStream(allocator: std.mem.Allocator, input: []const u8, op
         .arena = arena,
         .documents = documents,
     };
+}
+
+fn trySourceLineLoadStream(allocator: std.mem.Allocator, input: []const u8, options: LoadOptions) Error!?LoadedStream {
+    if (options.max_input_bytes) |max_input_bytes| {
+        if (input.len > max_input_bytes) {
+            setLimitDiagnostic(input, max_input_bytes, options, "input exceeds configured size limit");
+            return ParseError.Unsupported;
+        }
+    }
+
+    return trySourceLineLoadStreamAfterInputLimit(allocator, input, options);
+}
+
+fn trySourceLineLoadStreamAfterInputLimit(allocator: std.mem.Allocator, input: []const u8, options: LoadOptions) Error!?LoadedStream {
+    const shape = sourceLineShape(input) orelse return null;
+    try checkSourceLineLimits(input, options, shape);
+
+    if (options.max_document_count) |max_document_count| {
+        if (max_document_count == 0) {
+            setLoadFailureDiagnostic(input, options, .document_count_limit, ParseError.Unsupported);
+            return ParseError.Unsupported;
+        }
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
+    const stats = sourceLineStrictStats(shape);
+    const arena_allocator = arena.allocator();
+    var builder: StrictSimpleBuilder = .{
+        .arena_allocator = arena_allocator,
+        .temporary_allocator = allocator,
+        .input = input,
+        .options = options,
+        .nodes = try NodePool.init(arena_allocator, stats.node_count),
+    };
+
+    const root = switch (shape) {
+        .mapping => try builder.constructSourceLineMapping(input, stats.root_child_count),
+        .sequence => try builder.constructSourceLineSequence(input, stats.root_child_count),
+    };
+
+    const documents = try arena_allocator.alloc(*const value.Node, 1);
+    documents[0] = root;
+
+    if (options.diagnostic) |diagnostic| diagnostic.* = .{};
+    return .{
+        .arena = arena,
+        .documents = documents,
+    };
+}
+
+const max_source_line_implicit_key_bytes: usize = 1024;
+
+const SourceLineShape = union(enum) {
+    mapping: SourceLineStats,
+    sequence: SourceLineStats,
+};
+
+const SourceLineStats = struct {
+    strict: StrictShapeStats,
+    token_count: usize,
+};
+
+const SourceLinePair = struct {
+    key: []const u8,
+    value: []const u8,
+};
+
+const SourceLineIterator = struct {
+    input: []const u8,
+    cursor: usize = 0,
+
+    fn init(input: []const u8) SourceLineIterator {
+        return .{ .input = input };
+    }
+
+    fn next(self: *SourceLineIterator) ?[]const u8 {
+        if (self.cursor >= self.input.len) return null;
+
+        const start = self.cursor;
+        var end = start;
+        while (end < self.input.len and self.input[end] != '\n') : (end += 1) {}
+        self.cursor = if (end < self.input.len) end + 1 else end;
+        return self.input[start..end];
+    }
+
+    fn peek(self: *const SourceLineIterator) ?[]const u8 {
+        var copy = self.*;
+        return copy.next();
+    }
+};
+
+fn sourceLineShape(input: []const u8) ?SourceLineShape {
+    if (input.len == 0 or !hasOnlySourceLineBytes(input)) return null;
+
+    var lines = SourceLineIterator.init(input);
+    const first = lines.next() orelse return null;
+    if (first.len == 0) return null;
+
+    if (std.mem.startsWith(u8, first, "- ")) return sourceLineSequenceShape(input);
+    if (parseSourceLinePair(first) != null) return sourceLineMappingShape(input);
+    return null;
+}
+
+fn sourceLineStrictStats(shape: SourceLineShape) StrictShapeStats {
+    return switch (shape) {
+        inline else => |stats| stats.strict,
+    };
+}
+
+fn sourceLineTokenCount(shape: SourceLineShape) usize {
+    return switch (shape) {
+        inline else => |stats| stats.token_count,
+    };
+}
+
+fn sourceLineMappingShape(input: []const u8) ?SourceLineShape {
+    var lines = SourceLineIterator.init(input);
+    var pair_count: usize = 0;
+    var max_scalar_bytes: usize = 0;
+    var token_count: usize = 2;
+
+    while (lines.next()) |line| {
+        if (line.len == 0) return null;
+        const pair = parseSourceLinePair(line) orelse return null;
+        max_scalar_bytes = @max(max_scalar_bytes, pair.key.len);
+        max_scalar_bytes = @max(max_scalar_bytes, pair.value.len);
+        pair_count += 1;
+        token_count += 4;
+    }
+
+    if (pair_count == 0) return null;
+    return .{ .mapping = .{
+        .strict = .{
+            .event_count = 6 + pair_count * 2,
+            .max_nesting_depth = 1,
+            .max_scalar_bytes = max_scalar_bytes,
+            .node_count = 1 + pair_count * 2,
+            .root_child_count = pair_count,
+        },
+        .token_count = token_count,
+    } };
+}
+
+fn sourceLineSequenceShape(input: []const u8) ?SourceLineShape {
+    var lines = SourceLineIterator.init(input);
+    var item_count: usize = 0;
+    var item_event_count: usize = 0;
+    var max_nesting_depth: usize = 1;
+    var max_scalar_bytes: usize = 0;
+    var node_count: usize = 1;
+    var token_count: usize = 2;
+
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "- ")) return null;
+        const item = line[2..];
+        token_count += 2;
+
+        if (parseSourceLinePair(item)) |pair| {
+            max_nesting_depth = 2;
+            item_event_count += 2;
+            node_count += 1;
+            includeSourceLinePairStats(pair, &max_scalar_bytes, &item_event_count, &node_count);
+            token_count += 3;
+
+            while (lines.peek()) |next_line| {
+                if (std.mem.startsWith(u8, next_line, "- ")) break;
+                if (!std.mem.startsWith(u8, next_line, "  ")) return null;
+                const continuation = next_line[2..];
+                const continuation_pair = parseSourceLinePair(continuation) orelse return null;
+                _ = lines.next();
+                includeSourceLinePairStats(continuation_pair, &max_scalar_bytes, &item_event_count, &node_count);
+                token_count += 4;
+            }
+        } else {
+            if (!isSourceLineScalarToken(item)) return null;
+            max_scalar_bytes = @max(max_scalar_bytes, item.len);
+            item_event_count += 1;
+            node_count += 1;
+            token_count += 1;
+
+            if (lines.peek()) |next_line| {
+                if (!std.mem.startsWith(u8, next_line, "- ")) return null;
+            }
+        }
+
+        item_count += 1;
+    }
+
+    if (item_count == 0) return null;
+    return .{ .sequence = .{
+        .strict = .{
+            .event_count = 6 + item_event_count,
+            .max_nesting_depth = max_nesting_depth,
+            .max_scalar_bytes = max_scalar_bytes,
+            .node_count = node_count,
+            .root_child_count = item_count,
+        },
+        .token_count = token_count,
+    } };
+}
+
+fn includeSourceLinePairStats(
+    pair: SourceLinePair,
+    max_scalar_bytes: *usize,
+    item_event_count: *usize,
+    node_count: *usize,
+) void {
+    max_scalar_bytes.* = @max(max_scalar_bytes.*, pair.key.len);
+    max_scalar_bytes.* = @max(max_scalar_bytes.*, pair.value.len);
+    item_event_count.* += 2;
+    node_count.* += 2;
+}
+
+fn parseSourceLinePair(line: []const u8) ?SourceLinePair {
+    const separator = std.mem.indexOf(u8, line, ": ") orelse return null;
+    const key = line[0..separator];
+    const scalar_value = line[separator + 2 ..];
+    if (!isSourceLineKeyToken(key) or !isSourceLineScalarToken(scalar_value)) return null;
+    return .{ .key = key, .value = scalar_value };
+}
+
+fn isSourceLineKeyToken(token: []const u8) bool {
+    return token.len <= max_source_line_implicit_key_bytes and isSourceLineScalarToken(token);
+}
+
+fn isSourceLineScalarToken(token: []const u8) bool {
+    if (token.len == 0) return false;
+    if (std.mem.eql(u8, token, "-") or std.mem.eql(u8, token, "?")) return false;
+    for (token) |byte| {
+        if (byte <= ' ' or byte > '~') return false;
+    }
+    return std.mem.indexOfAny(u8, token, ":#%!&*'\"[]{},|>@`") == null;
+}
+
+fn hasOnlySourceLineBytes(input: []const u8) bool {
+    for (input) |byte| {
+        if (byte != '\n' and (byte < ' ' or byte > '~')) return false;
+    }
+    return true;
+}
+
+fn checkSourceLineLimits(input: []const u8, options: LoadOptions, shape: SourceLineShape) Error!void {
+    if (options.max_token_count) |max_token_count| {
+        if (sourceLineTokenCount(shape) > max_token_count) {
+            setLimitDiagnostic(input, input.len, options, "token count exceeds configured limit");
+            return ParseError.Unsupported;
+        }
+    }
+
+    try checkStrictStatsLimits(input, options, sourceLineStrictStats(shape));
 }
 
 const StrictSimpleShape = union(enum) {
@@ -475,8 +731,10 @@ fn isStrictSimpleTagToken(raw: []const u8) bool {
 }
 
 fn checkStrictShapeLimits(input: []const u8, options: LoadOptions, shape: StrictSimpleShape) Error!void {
-    const stats = strictShapeStats(shape);
+    try checkStrictStatsLimits(input, options, strictShapeStats(shape));
+}
 
+fn checkStrictStatsLimits(input: []const u8, options: LoadOptions, stats: StrictShapeStats) Error!void {
     if (options.max_event_count) |max_event_count| {
         if (stats.event_count > max_event_count) {
             setLimitDiagnostic(input, input.len, options, "event count exceeds configured limit");
@@ -641,6 +899,76 @@ const StrictSimpleBuilder = struct {
         const node = try self.nodes.create();
         node.* = .{ .mapping = .{ .pairs = owned_pairs } };
         return node;
+    }
+
+    fn constructSourceLineMapping(self: *StrictSimpleBuilder, input: []const u8, pair_count: usize) Error!*const value.Node {
+        const pairs = try self.arena_allocator.alloc(value.MappingPair, pair_count);
+
+        var lines = SourceLineIterator.init(input);
+        var pair_index: usize = 0;
+        while (lines.next()) |line| : (pair_index += 1) {
+            const pair = parseSourceLinePair(line) orelse return ParseError.InvalidSyntax;
+            pairs[pair_index] = try self.constructSourceLinePair(pair);
+        }
+
+        try self.validateMappingPairs(pairs);
+
+        const node = try self.nodes.create();
+        node.* = .{ .mapping = .{ .pairs = pairs } };
+        return node;
+    }
+
+    fn constructSourceLineSequence(self: *StrictSimpleBuilder, input: []const u8, item_count: usize) Error!*const value.Node {
+        const items = try self.arena_allocator.alloc(*const value.Node, item_count);
+
+        var lines = SourceLineIterator.init(input);
+        var item_index: usize = 0;
+        while (lines.next()) |line| : (item_index += 1) {
+            if (!std.mem.startsWith(u8, line, "- ")) return ParseError.InvalidSyntax;
+            const item = line[2..];
+            if (parseSourceLinePair(item)) |pair| {
+                items[item_index] = try self.constructSourceLineCompactMapping(pair, &lines);
+            } else {
+                if (!isSourceLineScalarToken(item)) return ParseError.InvalidSyntax;
+                items[item_index] = try self.constructPlainScalar(.{ .value = item });
+            }
+        }
+
+        const node = try self.nodes.create();
+        node.* = .{ .sequence = .{ .items = items } };
+        return node;
+    }
+
+    fn constructSourceLineCompactMapping(
+        self: *StrictSimpleBuilder,
+        first_pair: SourceLinePair,
+        lines: *SourceLineIterator,
+    ) Error!*const value.Node {
+        var pairs: std.ArrayList(value.MappingPair) = .empty;
+        errdefer pairs.deinit(self.arena_allocator);
+
+        try pairs.append(self.arena_allocator, try self.constructSourceLinePair(first_pair));
+        while (lines.peek()) |line| {
+            if (std.mem.startsWith(u8, line, "- ")) break;
+            if (!std.mem.startsWith(u8, line, "  ")) return ParseError.InvalidSyntax;
+            const pair = parseSourceLinePair(line[2..]) orelse return ParseError.InvalidSyntax;
+            _ = lines.next();
+            try pairs.append(self.arena_allocator, try self.constructSourceLinePair(pair));
+        }
+
+        const owned_pairs = try pairs.toOwnedSlice(self.arena_allocator);
+        try self.validateMappingPairs(owned_pairs);
+
+        const node = try self.nodes.create();
+        node.* = .{ .mapping = .{ .pairs = owned_pairs } };
+        return node;
+    }
+
+    fn constructSourceLinePair(self: *StrictSimpleBuilder, pair: SourceLinePair) Error!value.MappingPair {
+        return .{
+            .key = try self.constructPlainScalar(.{ .value = pair.key }),
+            .value = try self.constructPlainScalar(.{ .value = pair.value }),
+        };
     }
 
     fn constructPlainScalar(self: *StrictSimpleBuilder, scalar_token: StrictScalarToken) Error!*const value.Node {
@@ -848,6 +1176,155 @@ test "strict simple load fast path matches forced fallback" {
 
         try expectLoadedStreamsEqual(&fast, &fallback);
     }
+}
+
+test "source-line simple load fast path matches forced fallback" {
+    const cases = [_][]const u8{
+        "name: yaml\nversion: 1\n",
+        "- one\n- two\n",
+        "- id: 1\n  name: record-1\n- id: 2\n  name: record-2\n",
+    };
+
+    for (cases) |input| {
+        var direct = (try trySourceLineLoadStream(std.testing.allocator, input, .{})).?;
+        defer direct.deinit();
+
+        var fallback = try loadStreamViaEvents(std.testing.allocator, input, .{});
+        defer fallback.deinit();
+
+        try expectLoadedStreamsEqual(&direct, &fallback);
+    }
+}
+
+test "source-line simple load fast path declines unsupported shapes" {
+    const cases = [_][]const u8{
+        "plain\n",
+        "# comment\nkey: value\n",
+        "%YAML 1.2\n---\nvalue\n",
+        "---\nkey: value\n",
+        "...\n",
+        "key: value # comment\n",
+        "key: !local value\n",
+        "key: &anchor value\n",
+        "key: *anchor\n",
+        "key: 'quoted'\n",
+        "key: \"quoted\"\n",
+        "key: |\n  line\n",
+        "key: [value]\n",
+        "key: {nested: value}\n",
+        "key:\n",
+        "key: first\n  second\n",
+        "key: value\n\nother: value\n",
+        " key: value\n",
+        "foo bar: value\n",
+        "key: two words\n",
+        "key: value\r\n",
+        "key:\tvalue\n",
+        "caf\xc3\xa9: value\n",
+        "-\n",
+        "- - nested\n",
+        "- one\n  name: nope\n",
+        "- id: 1\n name: nope\n",
+        "- id: 1\n    name: nope\n",
+        "- id: 1\n  name: record one\n",
+    };
+
+    for (cases) |input| {
+        const loaded = try trySourceLineLoadStream(std.testing.allocator, input, .{});
+        if (loaded) |stream| {
+            var owned = stream;
+            defer owned.deinit();
+            return error.ExpectedFallback;
+        }
+        try std.testing.expect(loaded == null);
+    }
+}
+
+test "source-line simple load fast path preserves schema duplicate key and limit behavior" {
+    var core = (try trySourceLineLoadStream(std.testing.allocator, "truth: TRUE\nnothing: ~\n", .{ .schema = .core })).?;
+    defer core.deinit();
+    try std.testing.expect(core.documents[0].mapping.pairs[0].value.* == .bool_value);
+    try std.testing.expectEqual(true, core.documents[0].mapping.pairs[0].value.bool_value.value);
+    try std.testing.expect(core.documents[0].mapping.pairs[1].value.* == .null_value);
+
+    var failsafe = (try trySourceLineLoadStream(std.testing.allocator, "truth: TRUE\n", .{ .schema = .failsafe })).?;
+    defer failsafe.deinit();
+    try std.testing.expect(failsafe.documents[0].mapping.pairs[0].value.* == .scalar);
+    try std.testing.expectEqualStrings("TRUE", failsafe.documents[0].mapping.pairs[0].value.scalar.value);
+
+    var json = (try trySourceLineLoadStream(std.testing.allocator, "- true\n- false\n", .{ .schema = .json })).?;
+    defer json.deinit();
+    try std.testing.expect(json.documents[0].sequence.items[0].* == .bool_value);
+    try std.testing.expectEqual(true, json.documents[0].sequence.items[0].bool_value.value);
+
+    var diagnostic: diagnostics.Diagnostic = .{};
+    try std.testing.expectError(ParseError.InvalidSyntax, trySourceLineLoadStream(std.testing.allocator, "name: first\nname: second\n", .{
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("loader rejected duplicate mapping key", diagnostic.message);
+
+    var duplicate_allowed = (try trySourceLineLoadStream(std.testing.allocator, "name: first\nname: second\n", .{
+        .duplicate_key_behavior = .allow,
+    })).?;
+    defer duplicate_allowed.deinit();
+    try std.testing.expectEqual(@as(usize, 2), duplicate_allowed.documents[0].mapping.pairs.len);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, trySourceLineLoadStream(std.testing.allocator, "a: b\n", .{
+        .max_input_bytes = 1,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("input exceeds configured size limit", diagnostic.message);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, trySourceLineLoadStream(std.testing.allocator, "a: bb\n", .{
+        .max_scalar_bytes = 1,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("scalar exceeds configured size limit", diagnostic.message);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, trySourceLineLoadStream(std.testing.allocator, "a: b\n", .{
+        .max_token_count = 5,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("token count exceeds configured limit", diagnostic.message);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, trySourceLineLoadStream(std.testing.allocator, "a: b\n", .{
+        .max_event_count = 7,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("event count exceeds configured limit", diagnostic.message);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, trySourceLineLoadStream(std.testing.allocator, "a: b\n", .{
+        .max_nesting_depth = 0,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("nesting depth exceeds configured limit", diagnostic.message);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, trySourceLineLoadStream(std.testing.allocator, "a: b\n", .{
+        .max_document_count = 0,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("loader exceeded configured document count limit", diagnostic.message);
+}
+
+test "source-line simple load fast path cleans up accepted and declined allocation failures" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkSourceLineLoadAllocationFailure, .{});
+}
+
+fn checkSourceLineLoadAllocationFailure(failing_allocator: std.mem.Allocator) !void {
+    var mapping = (try trySourceLineLoadStream(failing_allocator, "name: yaml\nversion: 1\n", .{})).?;
+    defer mapping.deinit();
+
+    var sequence = (try trySourceLineLoadStream(failing_allocator, "- id: 1\n  name: record-1\n", .{})).?;
+    defer sequence.deinit();
+
+    const declined = try trySourceLineLoadStream(failing_allocator, "name: [yaml]\n", .{});
+    try std.testing.expect(declined == null);
 }
 
 test "strict simple load fast path declines unsupported shapes" {

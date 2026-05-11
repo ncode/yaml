@@ -10,6 +10,22 @@ const std = support.std;
 const expectScalarString = support.expectScalarString;
 const loadStreamWithOptions = support.loadStreamWithOptions;
 
+test "loadStreamWithOptions source-line fast path avoids scanner storage" {
+    var counter: LiveTrackingAllocator = .{ .child = std.testing.allocator };
+
+    var stream = try loadStreamWithOptions(counter.allocator(),
+        \\name: yaml
+        \\version: 1
+        \\enabled: true
+        \\
+    , .{});
+    defer stream.deinit();
+
+    try std.testing.expectEqual(counter.live_bytes, counter.peak_live_bytes);
+    try std.testing.expectEqual(@as(usize, 1), stream.documents.len);
+    try std.testing.expect(stream.documents[0].* == .mapping);
+}
+
 test "loadStreamWithOptions fast path releases parser storage before returning" {
     var counter: LiveTrackingAllocator = .{ .child = std.testing.allocator };
     const input = try std.testing.allocator.dupe(u8,
