@@ -70,7 +70,7 @@ jobs:
         run: zig build test-leaks
 
       - name: Coverage
-        run: zig build test-coverage -Duse-llvm=true
+        run: zig build test-coverage -Duse-llvm=true -Dcoverage-threshold=85
 
       - name: Valgrind leak checks
         run: zig build test-valgrind -Duse-llvm=true
