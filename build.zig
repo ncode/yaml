@@ -23,6 +23,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const test_filter = b.option([]const u8, "test-filter", "Run only tests whose names contain this text.");
     const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
+    // The self-hosted x86_64 backend (default on Linux since Zig 0.15) emits DWARF
+    // that kcov v43 cannot parse, producing empty coverage reports. Opt into the
+    // LLVM backend with -Duse-llvm=true for the coverage and valgrind CI steps.
+    // See ziglang/zig#24463 and #25368.
+    const use_llvm = b.option(bool, "use-llvm", "Build test binaries with the LLVM backend (needed for kcov coverage on Zig 0.16+).");
     const coverage_threshold = b.option(u8, "coverage-threshold", "Minimum line coverage percent required by test-coverage.") orelse 100;
     const yaml_test_suite_dir = b.option(
         []const u8,
@@ -52,6 +57,7 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{
         .root_module = yaml_unit_mod,
         .filters = test_filters,
+        .use_llvm = use_llvm,
     });
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const unit_step = b.step("test-unit", "Run library unit tests");
@@ -92,6 +98,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = unit_root.imports,
             .filters = test_filters,
+            .use_llvm = use_llvm,
         });
         focused_unit_coverage_artifacts[index] = focused_tests.compile;
         unit_step.dependOn(&focused_tests.run.step);
@@ -115,6 +122,7 @@ pub fn build(b: *std.Build) void {
     const conformance_tests = b.addTest(.{
         .root_module = conformance_mod,
         .filters = test_filters,
+        .use_llvm = use_llvm,
     });
     const run_conformance_tests = b.addRunArtifact(conformance_tests);
     const conformance_step = b.step("test-conformance", "Run yaml-test-suite conformance tests");
@@ -139,6 +147,7 @@ pub fn build(b: *std.Build) void {
     const direct_conformance_tests = b.addTest(.{
         .root_module = direct_conformance_mod,
         .filters = test_filters,
+        .use_llvm = use_llvm,
     });
     const run_direct_conformance_tests = b.addRunArtifact(direct_conformance_tests);
     const direct_conformance_step = b.step("test-direct-conformance", "Run yaml-test-suite directly through scanner and parser layers");
@@ -185,6 +194,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{.{ .name = "yaml_event_parser", .module = event_parser_mod }},
         .filters = test_filters,
+        .use_llvm = use_llvm,
     });
     unit_step.dependOn(&parser_tokens_unit_tests.run.step);
     focused_unit_coverage_artifacts[focused_unit_roots.len] = parser_tokens_unit_tests.compile;
@@ -205,6 +215,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .filters = test_filters,
+            .use_llvm = use_llvm,
         });
         structure_step.dependOn(&run_structure_tests.step);
     }
@@ -219,6 +230,7 @@ pub fn build(b: *std.Build) void {
     const stress_tests = b.addTest(.{
         .root_module = stress_mod,
         .filters = test_filters,
+        .use_llvm = use_llvm,
     });
     const run_stress_tests = b.addRunArtifact(stress_tests);
     const stress_step = b.step("test-stress", "Run generated stress and limit tests");
@@ -234,6 +246,7 @@ pub fn build(b: *std.Build) void {
     const allocation_tests = b.addTest(.{
         .root_module = allocation_mod,
         .filters = test_filters,
+        .use_llvm = use_llvm,
     });
     const run_allocation_tests = b.addRunArtifact(allocation_tests);
     const allocation_step = b.step("test-allocation", "Run allocator failure and cleanup tests");
