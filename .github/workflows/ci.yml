@@ -23,7 +23,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             kcov valgrind \
-            git ca-certificates curl xz-utils
+            git ca-certificates curl xz-utils \
+            gnupg
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -71,6 +72,13 @@ jobs:
 
       - name: Coverage
         run: zig build test-coverage -Duse-llvm=true -Dcoverage-threshold=85
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: zig-out/coverage/merged/cobertura.xml
+          fail_ci_if_error: false
 
       - name: Valgrind leak checks
         run: zig build test-valgrind -Duse-llvm=true
