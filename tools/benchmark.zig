@@ -71,6 +71,11 @@ const AllocationRun = struct {
     retained_bytes: usize,
 };
 
+const CountMetrics = struct {
+    token_count: usize,
+    event_count: usize,
+};
+
 const conformance_subset =
     \\---
     \\foo:
@@ -95,6 +100,7 @@ pub fn main(init: std.process.Init) !void {
     defer deinitFixtures(allocator, fixtures);
 
     try stdout.print("yaml benchmark\n", .{});
+    try stdout.print("types scanner_token_size={} parser_event_size={}\n", .{ @sizeOf(yaml_internal.scanner.Token), @sizeOf(yaml_internal.parser.Event) });
     try stdout.print("format: input bytes api iterations ns_per_op bytes_per_sec checksum\n", .{});
 
     for (fixtures) |fixture| {
@@ -110,15 +116,16 @@ pub fn main(init: std.process.Init) !void {
 
     try stdout.print("allocation counts\n", .{});
     for (fixtures) |fixture| {
-        try reportAllocations(allocator, stdout, fixture, .scanner);
-        try reportAllocations(allocator, stdout, fixture, .parser_events);
-        try reportAllocations(allocator, stdout, fixture, .composer_events);
-        try reportAllocations(allocator, stdout, fixture, .loader_events);
+        const counts = try countTokensAndEvents(allocator, fixture.input);
+        try reportAllocations(allocator, stdout, fixture, .scanner, counts);
+        try reportAllocations(allocator, stdout, fixture, .parser_events, counts);
+        try reportAllocations(allocator, stdout, fixture, .composer_events, counts);
+        try reportAllocations(allocator, stdout, fixture, .loader_events, counts);
         if (fixture.single_document) {
-            try reportAllocations(allocator, stdout, fixture, .load_default);
-            try reportAllocations(allocator, stdout, fixture, .load_failsafe_allow);
+            try reportAllocations(allocator, stdout, fixture, .load_default, counts);
+            try reportAllocations(allocator, stdout, fixture, .load_failsafe_allow, counts);
         } else {
-            try reportAllocations(allocator, stdout, fixture, .load_stream_default);
+            try reportAllocations(allocator, stdout, fixture, .load_stream_default, counts);
         }
     }
 
@@ -258,6 +265,19 @@ test "public load allocation metrics report retained and peak live bytes" {
     try std.testing.expectEqual(metrics.allocated_bytes, metrics.freed_bytes);
 }
 
+test "benchmark count metrics include scanner tokens and parser events" {
+    const counts = try countTokensAndEvents(std.testing.allocator,
+        \\name: yaml
+        \\items:
+        \\  - one
+        \\  - two
+        \\
+    );
+
+    try std.testing.expect(counts.token_count > 0);
+    try std.testing.expect(counts.event_count > 0);
+}
+
 fn expectFixture(fixtures: []const Fixture, name: []const u8) !void {
     for (fixtures) |fixture| {
         if (std.mem.eql(u8, fixture.name, name)) return;
@@ -384,14 +404,17 @@ fn reportAllocations(
     stdout: *Io.Writer,
     fixture: Fixture,
     allocation_path: AllocationPath,
+    counts: CountMetrics,
 ) !void {
     const metrics = try measureAllocations(allocator, fixture.input, allocation_path);
     try stdout.print(
-        "allocs input={s} bytes={} api={s} allocations={} frees={} allocated_bytes={} freed_bytes={} retained_bytes={} peak_live_bytes={} checksum={}\n",
+        "allocs input={s} bytes={} api={s} token_count={} event_count={} allocations={} frees={} allocated_bytes={} freed_bytes={} retained_bytes={} peak_live_bytes={} checksum={}\n",
         .{
             fixture.name,
             fixture.input.len,
             allocation_path.label(),
+            counts.token_count,
+            counts.event_count,
             metrics.allocations,
             metrics.frees,
             metrics.allocated_bytes,
@@ -514,6 +537,19 @@ fn measurePublicLoadAllocations(
     return .{
         .checksum = checksum,
         .retained_bytes = counter.live_bytes,
+    };
+}
+
+fn countTokensAndEvents(allocator: std.mem.Allocator, input: []const u8) !CountMetrics {
+    var token_stream = try yaml_internal.scanner.scan(allocator, input);
+    defer token_stream.deinit();
+
+    var event_stream = try yaml_internal.parseTokens(allocator, token_stream.tokens);
+    defer event_stream.deinit();
+
+    return .{
+        .token_count = token_stream.tokens.len,
+        .event_count = event_stream.events.len,
     };
 }
 
