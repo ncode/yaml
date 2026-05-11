@@ -1,5 +1,7 @@
 # yaml
 
+[![CI](https://github.com/ncode/yaml/actions/workflows/ci.yml/badge.svg)](https://github.com/ncode/yaml/actions/workflows/ci.yml)
+
 Native Zig YAML 1.2.2 library.
 
 ## Why This Library
@@ -16,6 +18,7 @@ Native Zig YAML 1.2.2 library.
 - Requires **Zig 0.16.0** or newer (enforced at build time).
 - **YAML 1.2.2 compliant.** The library passes every case in the vendored `yaml-test-suite` at the pinned released tag (currently `data-2022-01-17`, see `vendor/yaml-test-suite.PIN`). The skip list in `tests/conformance/skips.zig` is empty, and the build refuses to accept new skips against the pinned suite.
 - Run `zig build conformance-report` for current parser, loader, expected-error, and emitter coverage counts.
+- Pre-1.0: the public API may still change before a tagged release.
 
 ## Install
 
@@ -49,15 +52,17 @@ const std = @import("std");
 const yaml = @import("yaml");
 
 pub fn main() !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_allocator.deinit();
+    const allocator = debug_allocator.allocator();
 
     var document = try yaml.load(allocator, "name: yaml\nactive: true\n");
     defer document.deinit();
 
     const output = try yaml.dump(allocator, document.root);
     defer allocator.free(output);
+
+    std.debug.print("{s}", .{output});
 }
 ```
 
@@ -106,6 +111,13 @@ const Config = struct {
     enabled: bool = true,
 };
 
+var typed = try yaml.loadTyped(Config, allocator, input);
+defer typed.deinit();
+```
+
+Use `loadTypedWithOptions` to pass parser and conversion options together:
+
+```zig
 var parse_diagnostic: yaml.Diagnostic = .{};
 var typed_diagnostic: yaml.TypedDiagnostic = .{};
 
@@ -123,7 +135,15 @@ var typed = try yaml.loadTypedWithOptions(Config, allocator, input, .{
 defer typed.deinit();
 ```
 
-`load` options control schema, duplicate keys, unknown tags, limits, and parser diagnostics. `conversion` options control typed-conversion behavior and diagnostics. `convertNode` is available when you already have a loaded `Node` graph.
+`load` options control schema, duplicate keys, unknown tags, limits, and parser diagnostics. `conversion` options control typed-conversion behavior and diagnostics. `loadStreamTyped` covers multi-document inputs. `convertNode` converts an already-loaded `Node` graph:
+
+```zig
+var loaded = try yaml.load(allocator, input);
+defer loaded.deinit();
+
+var converted = try yaml.convertNode(Config, allocator, loaded.root, .{});
+defer converted.deinit();
+```
 
 Conversion failures return typed errors such as `error.MissingField`, `error.TypeMismatch`, `error.LengthMismatch`, `error.AmbiguousField`, and `error.UnsupportedTargetType`.
 
@@ -142,6 +162,8 @@ try yaml.dumpToWriter(allocator, &writer, document.root);
 const emitted = try yaml.emitEvents(allocator, events.events);
 defer allocator.free(emitted);
 ```
+
+`dumpStream` and `dumpStreamToWriter` serialize a `LoadedStream`; `emitValue` and `emitValueToWriter` are lower-level node-graph variants alongside `dump`. Every emit and dump function has a `*WithOptions` form.
 
 Emitter and dumper options control collection style preservation, `%TAG` directive preservation, redundant document-start omission, and output size limits.
 
@@ -199,7 +221,7 @@ zig build docs
 Tools:
 
 ```sh
-zig build benchmark            # parser/loader micro-benchmarks
+zig build bench                # parser/loader micro-benchmarks
 zig build conformance-report   # current yaml-test-suite coverage counts
 zig build libfyaml-compare     # cross-check suite behavior against libfyaml fy-tool
 ```
