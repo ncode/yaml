@@ -163,13 +163,13 @@ fn appendSimpleScalarEvent(allocator: std.mem.Allocator, events: *EventBuilder, 
     try events.append(allocator, .{ .scalar = .{ .value = try allocator.dupe(u8, value) } });
 }
 
-fn isSimplePlainScalarToken(value: []const u8) bool {
+pub fn isSimplePlainScalarToken(value: []const u8) bool {
     if (!scalar_parser.isPlainScalarToken(value)) return false;
     if (std.mem.eql(u8, value, "-") or std.mem.eql(u8, value, "?")) return false;
     return std.mem.indexOfAny(u8, value, " \t\r\n") == null;
 }
 
-fn isSimpleBlockMappingKeyToken(value: []const u8) bool {
+pub fn isSimpleBlockMappingKeyToken(value: []const u8) bool {
     return value.len <= max_simple_implicit_key_bytes and isSimplePlainScalarToken(value);
 }
 
