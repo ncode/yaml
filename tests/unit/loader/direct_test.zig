@@ -78,6 +78,50 @@ test "loader direct: load options match composed path" {
     try expectDirectMatchesComposed(&unknown_tag_events, .core, .reject, .preserve, null);
 }
 
+test "loader direct: duplicate key validation uses temporary allocator" {
+    const pair_count = 40;
+    var key_strings: [pair_count][]u8 = undefined;
+    for (&key_strings, 0..) |*key, index| {
+        key.* = try std.fmt.allocPrint(std.testing.allocator, "key-{d}", .{index});
+    }
+    defer for (key_strings) |key| std.testing.allocator.free(key);
+
+    var events: [pair_count * 2 + 6]Event = undefined;
+    events[0] = .stream_start;
+    events[1] = .{ .document_start = .{} };
+    events[2] = .{ .mapping_start = .{ .style = .block } };
+    for (key_strings, 0..) |key, index| {
+        events[3 + index * 2] = .{ .scalar = .{ .value = key } };
+        events[4 + index * 2] = .{ .scalar = .{ .value = "value" } };
+    }
+    events[events.len - 3] = .mapping_end;
+    events[events.len - 2] = .{ .document_end = .{} };
+    events[events.len - 1] = .stream_end;
+
+    var output_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer output_arena.deinit();
+    var temporary_counter: LiveCountingAllocator = .{ .child = std.testing.allocator };
+
+    const documents = try loader.loadStreamFromEventsWithFailure(
+        output_arena.allocator(),
+        temporary_counter.allocator(),
+        &events,
+        .core,
+        .reject,
+        .preserve,
+        null,
+        null,
+        null,
+        null,
+        true,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), documents.len);
+    try std.testing.expectEqual(@as(usize, pair_count), documents[0].mapping.pairs.len);
+    try std.testing.expect(temporary_counter.allocations > 0);
+    try std.testing.expectEqual(@as(usize, 0), temporary_counter.live_bytes);
+}
+
 test "loader: alias events use composed fallback" {
     const events = [_]Event{
         .stream_start,
@@ -396,3 +440,57 @@ fn expectOptionalStringEqual(expected: ?[]const u8, actual: ?[]const u8) !void {
         try std.testing.expect(actual == null);
     }
 }
+
+const LiveCountingAllocator = struct {
+    child: std.mem.Allocator,
+    allocations: usize = 0,
+    live_bytes: usize = 0,
+
+    fn allocator(self: *LiveCountingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = alloc,
+                .resize = resize,
+                .remap = remap,
+                .free = free,
+            },
+        };
+    }
+
+    fn alloc(context: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LiveCountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.child.rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.allocations += 1;
+        self.live_bytes += len;
+        return result;
+    }
+
+    fn resize(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LiveCountingAllocator = @ptrCast(@alignCast(context));
+        if (!self.child.rawResize(memory, alignment, new_len, ret_addr)) return false;
+        self.countResize(memory.len, new_len);
+        return true;
+    }
+
+    fn remap(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LiveCountingAllocator = @ptrCast(@alignCast(context));
+        const result = self.child.rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        self.countResize(memory.len, new_len);
+        return result;
+    }
+
+    fn free(context: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LiveCountingAllocator = @ptrCast(@alignCast(context));
+        self.live_bytes -= memory.len;
+        self.child.rawFree(memory, alignment, ret_addr);
+    }
+
+    fn countResize(self: *LiveCountingAllocator, old_len: usize, new_len: usize) void {
+        if (new_len > old_len) {
+            self.live_bytes += new_len - old_len;
+        } else {
+            self.live_bytes -= old_len - new_len;
+        }
+    }
+};

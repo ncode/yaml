@@ -76,6 +76,7 @@ pub fn loadStreamWithOptions(allocator: std.mem.Allocator, input: []const u8, op
     var load_failure: loader.LoadFailure = .unknown;
     const documents = loader.loadStreamFromEventsWithFailure(
         arena.allocator(),
+        allocator,
         event_stream.events,
         options.schema,
         options.duplicate_key_behavior,
@@ -103,11 +104,7 @@ pub fn loadStreamWithOptions(allocator: std.mem.Allocator, input: []const u8, op
 fn loadStreamFastPath(allocator: std.mem.Allocator, input: []const u8, options: LoadOptions) Error!?LoadedStream {
     if (std.mem.indexOfScalar(u8, input, '*') != null) return null;
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    errdefer arena.deinit();
-    const arena_allocator = arena.allocator();
-
-    const event_stream = try parse.parseEventsWithOptions(arena_allocator, input, .{
+    var event_stream = try parse.parseEventsWithOptions(allocator, input, .{
         .max_input_bytes = options.max_input_bytes,
         .max_event_count = options.max_event_count,
         .max_token_count = options.max_token_count,
@@ -115,10 +112,16 @@ fn loadStreamFastPath(allocator: std.mem.Allocator, input: []const u8, options: 
         .max_scalar_bytes = options.max_scalar_bytes,
         .diagnostic = options.diagnostic,
     });
+    defer event_stream.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const arena_allocator = arena.allocator();
 
     var load_failure: loader.LoadFailure = .unknown;
     const documents = loader.loadStreamFromEventsWithFailure(
         arena_allocator,
+        allocator,
         event_stream.events,
         options.schema,
         options.duplicate_key_behavior,
@@ -127,7 +130,7 @@ fn loadStreamFastPath(allocator: std.mem.Allocator, input: []const u8, options: 
         options.max_alias_expansion,
         options.max_document_count,
         &load_failure,
-        false,
+        true,
     ) catch |err| {
         if (options.diagnostic) |diagnostic| {
             if (diagnostic.message.len == 0) {

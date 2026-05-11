@@ -37,6 +37,7 @@ pub fn constructStream(
 ) Error![]const *const Node {
     return constructStreamWithFailure(
         allocator,
+        allocator,
         documents,
         selected_schema,
         duplicate_key_behavior,
@@ -51,6 +52,7 @@ pub fn constructStream(
 /// copied into `allocator` so loaded values outlive parser event storage.
 pub fn constructStreamWithFailure(
     allocator: std.mem.Allocator,
+    temporary_allocator: std.mem.Allocator,
     documents: []const *const graph.Node,
     selected_schema: Schema,
     duplicate_key_behavior: DuplicateKeyBehavior,
@@ -60,6 +62,7 @@ pub fn constructStreamWithFailure(
 ) Error![]const *const Node {
     var constructor: Constructor = .{
         .allocator = allocator,
+        .temporary_allocator = temporary_allocator,
         .schema = selected_schema,
         .duplicate_key_behavior = duplicate_key_behavior,
         .unknown_tag_behavior = unknown_tag_behavior,
@@ -71,6 +74,7 @@ pub fn constructStreamWithFailure(
 
 const Constructor = struct {
     allocator: std.mem.Allocator,
+    temporary_allocator: std.mem.Allocator,
     schema: Schema,
     duplicate_key_behavior: DuplicateKeyBehavior,
     unknown_tag_behavior: UnknownTagBehavior,
@@ -197,12 +201,12 @@ const Constructor = struct {
                     .tag = try copyOptionalSlice(self.allocator, mapping.tag),
                 } };
                 if (tag.isStandardSetTag(mapping.tag)) {
-                    duplicate_key.validateUniqueMappingKeys(self.allocator, owned_pairs) catch |err| {
+                    duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
                         self.recordFailure(.invalid_standard_tag);
                         return err;
                     };
                 } else if (self.duplicate_key_behavior == .reject) {
-                    duplicate_key.validateUniqueMappingKeys(self.allocator, owned_pairs) catch |err| {
+                    duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
                         self.recordFailure(.duplicate_key);
                         return err;
                     };

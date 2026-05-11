@@ -46,6 +46,7 @@ pub fn loadStreamFromEvents(
     try limit.checkSummary(summary, .{ .max_document_count = max_document_count }, load_failure);
     return loadStreamFromEventsWithSummary(
         allocator,
+        allocator,
         events,
         selected_schema,
         duplicate_key_behavior,
@@ -57,6 +58,7 @@ pub fn loadStreamFromEvents(
 
 pub fn loadStreamFromEventsWithSummary(
     allocator: std.mem.Allocator,
+    temporary_allocator: std.mem.Allocator,
     events: []const Event,
     selected_schema: Schema,
     duplicate_key_behavior: DuplicateKeyBehavior,
@@ -66,6 +68,7 @@ pub fn loadStreamFromEventsWithSummary(
 ) Error![]const *const Node {
     return loadStreamFromEventsWithStringPolicy(
         allocator,
+        temporary_allocator,
         events,
         selected_schema,
         duplicate_key_behavior,
@@ -88,6 +91,7 @@ pub fn loadStreamFromEventsBorrowingStringsWithSummary(
 ) Error![]const *const Node {
     return loadStreamFromEventsWithStringPolicy(
         allocator,
+        allocator,
         events,
         selected_schema,
         duplicate_key_behavior,
@@ -100,6 +104,7 @@ pub fn loadStreamFromEventsBorrowingStringsWithSummary(
 
 pub fn loadStreamFromEventsWithStringPolicy(
     allocator: std.mem.Allocator,
+    temporary_allocator: std.mem.Allocator,
     events: []const Event,
     selected_schema: Schema,
     duplicate_key_behavior: DuplicateKeyBehavior,
@@ -109,9 +114,17 @@ pub fn loadStreamFromEventsWithStringPolicy(
     copy_strings: bool,
 ) Error![]const *const Node {
     if (summary.has_aliases) return ParseError.Unsupported;
+    const collection_child_counts = buildDirectCollectionChildCounts(temporary_allocator, events) catch |err| {
+        if (err == ParseError.InvalidSyntax) recordFailure(load_failure, .invalid_graph);
+        return err;
+    };
+    defer if (collection_child_counts.len > 0) temporary_allocator.free(collection_child_counts);
+
     var loader: DirectLoader = .{
         .allocator = allocator,
+        .temporary_allocator = temporary_allocator,
         .events = events,
+        .collection_child_counts = collection_child_counts,
         .schema = selected_schema,
         .duplicate_key_behavior = duplicate_key_behavior,
         .unknown_tag_behavior = unknown_tag_behavior,
@@ -125,7 +138,10 @@ pub fn loadStreamFromEventsWithStringPolicy(
 
 const DirectLoader = struct {
     allocator: std.mem.Allocator,
+    temporary_allocator: std.mem.Allocator,
     events: []const Event,
+    collection_child_counts: []const usize,
+    collection_child_count_index: usize = 0,
     schema: Schema,
     duplicate_key_behavior: DuplicateKeyBehavior,
     unknown_tag_behavior: UnknownTagBehavior,
@@ -177,8 +193,8 @@ const DirectLoader = struct {
 
         return switch (current) {
             .scalar => |scalar| self.constructScalar(scalar),
-            .sequence_start => |collection| self.constructSequence(collection),
-            .mapping_start => |collection| self.constructMapping(collection),
+            .sequence_start => |collection| self.constructSequence(try self.nextCollectionChildCount(), collection),
+            .mapping_start => |collection| self.constructMapping(try self.nextCollectionChildCount(), collection),
             .alias => ParseError.Unsupported,
             else => self.invalidGraph(),
         };
@@ -208,13 +224,13 @@ const DirectLoader = struct {
         return node;
     }
 
-    fn constructSequence(self: *DirectLoader, collection: parser_event.CollectionStart) Error!*const Node {
+    fn constructSequence(self: *DirectLoader, child_count: usize, collection: parser_event.CollectionStart) Error!*const Node {
         const node = try self.nodes.create();
         try self.validateTag(collection.tag, .sequence);
 
         var items: std.ArrayList(*const Node) = .empty;
         errdefer items.deinit(self.allocator);
-        try items.ensureTotalCapacity(self.allocator, countDirectCollectionNodes(self.events, self.index, false));
+        try items.ensureTotalCapacity(self.allocator, child_count);
 
         while (self.index < self.events.len and self.events[self.index] != .sequence_end) {
             try items.append(self.allocator, try self.constructNode());
@@ -240,13 +256,13 @@ const DirectLoader = struct {
         return node;
     }
 
-    fn constructMapping(self: *DirectLoader, collection: parser_event.CollectionStart) Error!*const Node {
+    fn constructMapping(self: *DirectLoader, child_count: usize, collection: parser_event.CollectionStart) Error!*const Node {
         const node = try self.nodes.create();
         try self.validateTag(collection.tag, .mapping);
 
         var pairs: std.ArrayList(MappingPair) = .empty;
         errdefer pairs.deinit(self.allocator);
-        try pairs.ensureTotalCapacity(self.allocator, countDirectCollectionNodes(self.events, self.index, true) / 2);
+        try pairs.ensureTotalCapacity(self.allocator, child_count / 2);
 
         while (self.index < self.events.len and self.events[self.index] != .mapping_end) {
             const key = try self.constructNode();
@@ -268,12 +284,12 @@ const DirectLoader = struct {
         } };
         if (tag.isStandardSetTag(collection.tag)) {
             try self.validateStandardSetContent(owned_pairs);
-            duplicate_key.validateUniqueMappingKeys(self.allocator, owned_pairs) catch |err| {
+            duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
                 self.recordFailure(.invalid_standard_tag);
                 return err;
             };
         } else if (self.duplicate_key_behavior == .reject) {
-            duplicate_key.validateUniqueMappingKeys(self.allocator, owned_pairs) catch |err| {
+            duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
                 self.recordFailure(.duplicate_key);
                 return err;
             };
@@ -360,7 +376,68 @@ const DirectLoader = struct {
     fn retainOptionalSlice(self: *DirectLoader, maybe_value: ?[]const u8) std.mem.Allocator.Error!?[]const u8 {
         return if (maybe_value) |slice| try self.retainSlice(slice) else null;
     }
+
+    fn nextCollectionChildCount(self: *DirectLoader) Error!usize {
+        if (self.collection_child_count_index >= self.collection_child_counts.len) return self.invalidGraph();
+        const child_count = self.collection_child_counts[self.collection_child_count_index];
+        self.collection_child_count_index += 1;
+        return child_count;
+    }
 };
+
+fn buildDirectCollectionChildCounts(allocator: std.mem.Allocator, events: []const Event) Error![]usize {
+    const collection_count = countCollectionStarts(events);
+    if (collection_count == 0) return &[_]usize{};
+
+    const counts = try allocator.alloc(usize, collection_count);
+    errdefer allocator.free(counts);
+    @memset(counts, 0);
+
+    const stack = try allocator.alloc(usize, collection_count);
+    defer allocator.free(stack);
+
+    var stack_len: usize = 0;
+    var next_collection: usize = 0;
+    for (events) |event_value| {
+        switch (event_value) {
+            .sequence_start, .mapping_start => {
+                if (stack_len > 0) counts[stack[stack_len - 1]] += 1;
+                stack[stack_len] = next_collection;
+                stack_len += 1;
+                next_collection += 1;
+            },
+            .scalar, .alias => {
+                if (stack_len > 0) counts[stack[stack_len - 1]] += 1;
+            },
+            .sequence_end, .mapping_end => {
+                if (stack_len == 0) return ParseError.InvalidSyntax;
+                stack_len -= 1;
+            },
+            else => {},
+        }
+    }
+
+    if (stack_len != 0) return ParseError.InvalidSyntax;
+    if (next_collection != collection_count) return ParseError.InvalidSyntax;
+    return counts;
+}
+
+fn countCollectionStarts(events: []const Event) usize {
+    var count: usize = 0;
+    for (events) |event_value| {
+        switch (event_value) {
+            .sequence_start, .mapping_start => count += 1,
+            else => {},
+        }
+    }
+    return count;
+}
+
+fn recordFailure(load_failure: ?*LoadFailure, load_failure_value: LoadFailure) void {
+    if (load_failure) |target| {
+        if (target.* == .unknown) target.* = load_failure_value;
+    }
+}
 
 fn isSetNullValue(node: *const Node) bool {
     return switch (node.*) {
@@ -370,36 +447,32 @@ fn isSetNullValue(node: *const Node) bool {
     };
 }
 
-fn countDirectCollectionNodes(events: []const Event, start: usize, mapping: bool) usize {
-    var count: usize = 0;
-    var depth: usize = 0;
-    var index = start;
-    while (index < events.len) : (index += 1) {
-        const event_value = events[index];
-        if (depth == 0 and collectionEnded(event_value, mapping)) return count;
-        if (depth == 0 and eventStartsNode(event_value)) count += 1;
-        switch (event_value) {
-            .sequence_start, .mapping_start => depth += 1,
-            .sequence_end, .mapping_end => {
-                if (depth > 0) depth -= 1;
-            },
-            else => {},
-        }
-    }
-    return count;
-}
-
-fn collectionEnded(event_value: Event, mapping: bool) bool {
-    return if (mapping) event_value == .mapping_end else event_value == .sequence_end;
-}
-
-fn eventStartsNode(event_value: Event) bool {
-    return switch (event_value) {
-        .scalar, .sequence_start, .mapping_start => true,
-        else => false,
-    };
-}
-
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "direct loader precomputes collection child counts" {
+    const events = [_]Event{
+        .stream_start,
+        .{ .document_start = .{} },
+        .{ .mapping_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "items" } },
+        .{ .sequence_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "one" } },
+        .{ .mapping_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "key" } },
+        .{ .scalar = .{ .value = "value" } },
+        .mapping_end,
+        .sequence_end,
+        .mapping_end,
+        .{ .document_end = .{} },
+        .stream_end,
+    };
+
+    const counts = try buildDirectCollectionChildCounts(std.testing.allocator, &events);
+    defer std.testing.allocator.free(counts);
+
+    try std.testing.expectEqual(@as(usize, 2), counts[0]);
+    try std.testing.expectEqual(@as(usize, 2), counts[1]);
+    try std.testing.expectEqual(@as(usize, 2), counts[2]);
 }

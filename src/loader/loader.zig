@@ -26,10 +26,6 @@ const UnknownTagBehavior = options.UnknownTagBehavior;
 
 pub const LoadFailure = failure.LoadFailure;
 
-/// Loads YAML parser events into arena-owned public value-model document roots.
-///
-/// The caller owns returned slice and all returned node data through
-/// `allocator`. In normal public use this allocator is a document arena.
 pub fn loadStreamFromEvents(
     allocator: std.mem.Allocator,
     events: []const Event,
@@ -41,6 +37,7 @@ pub fn loadStreamFromEvents(
     max_document_count: ?usize,
 ) Error![]const *const Node {
     return loadStreamFromEventsWithFailure(
+        allocator,
         allocator,
         events,
         selected_schema,
@@ -54,10 +51,9 @@ pub fn loadStreamFromEvents(
     );
 }
 
-/// Loads YAML parser events and records loader-stage failure categories when a
-/// diagnostic-aware public API needs to describe non-parser failures.
 pub fn loadStreamFromEventsWithFailure(
     allocator: std.mem.Allocator,
+    temporary_allocator: std.mem.Allocator,
     events: []const Event,
     selected_schema: Schema,
     duplicate_key_behavior: DuplicateKeyBehavior,
@@ -77,6 +73,7 @@ pub fn loadStreamFromEventsWithFailure(
     if (!summary.has_aliases) {
         return direct.loadStreamFromEventsWithStringPolicy(
             allocator,
+            temporary_allocator,
             events,
             selected_schema,
             duplicate_key_behavior,
@@ -89,6 +86,7 @@ pub fn loadStreamFromEventsWithFailure(
 
     return loadStreamFromEventsComposedUnchecked(
         allocator,
+        temporary_allocator,
         events,
         selected_schema,
         duplicate_key_behavior,
@@ -120,6 +118,7 @@ pub fn loadStreamFromEventsComposed(
 
     return loadStreamFromEventsComposedUnchecked(
         allocator,
+        allocator,
         events,
         selected_schema,
         duplicate_key_behavior,
@@ -133,6 +132,7 @@ pub fn loadStreamFromEventsComposed(
 
 fn loadStreamFromEventsComposedUnchecked(
     allocator: std.mem.Allocator,
+    temporary_allocator: std.mem.Allocator,
     events: []const Event,
     selected_schema: Schema,
     duplicate_key_behavior: DuplicateKeyBehavior,
@@ -157,6 +157,7 @@ fn loadStreamFromEventsComposedUnchecked(
 
     return construct.constructStreamWithFailure(
         allocator,
+        temporary_allocator,
         graph_documents,
         selected_schema,
         duplicate_key_behavior,

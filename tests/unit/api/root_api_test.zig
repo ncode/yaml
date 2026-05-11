@@ -7,6 +7,7 @@
 comptime {
     _ = @import("parse_test.zig");
     _ = @import("load_test.zig");
+    _ = @import("load_memory_test.zig");
     _ = @import("tags_test.zig");
     _ = @import("emit_test.zig");
     _ = @import("diagnostics_test.zig");
