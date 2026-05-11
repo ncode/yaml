@@ -142,7 +142,9 @@ fn loadStreamFromEventsComposedUnchecked(
     load_failure: ?*LoadFailure,
     has_alias_events: bool,
 ) Error![]const *const Node {
-    const graph_documents = composer.composeStream(allocator, events, .{
+    var compose_arena = std.heap.ArenaAllocator.init(temporary_allocator);
+    defer compose_arena.deinit();
+    const graph_documents = composer.composeStream(compose_arena.allocator(), events, .{
         .max_alias_count = max_alias_count,
         .max_alias_expansion = max_alias_expansion,
         .max_document_count = null,
@@ -154,7 +156,6 @@ fn loadStreamFromEventsComposedUnchecked(
         }
         return err;
     };
-
     return construct.constructStreamWithFailure(
         allocator,
         temporary_allocator,
