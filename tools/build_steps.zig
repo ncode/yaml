@@ -12,6 +12,7 @@ pub const TestRootOptions = struct {
     optimize: std.builtin.OptimizeMode,
     imports: []const std.Build.Module.Import = &.{},
     filters: []const []const u8 = &.{},
+    use_llvm: ?bool = null,
 };
 
 pub const TestArtifacts = struct {
@@ -48,6 +49,7 @@ pub fn addTestRunAndArtifact(b: *std.Build, options: TestRootOptions) TestRunAnd
     const tests = b.addTest(.{
         .root_module = module,
         .filters = options.filters,
+        .use_llvm = options.use_llvm,
     });
     return .{
         .compile = tests,
@@ -114,8 +116,6 @@ pub fn addCoverageStep(b: *std.Build, artifacts: TestArtifacts, options: Coverag
         kcov,
         "--merge",
         "--dump-summary",
-        "--include-path=src",
-        "--exclude-path=tests,vendor,.zig-cache,zig-out",
         b.pathJoin(&.{ coverage_root, "merged" }),
     });
 
@@ -193,12 +193,17 @@ fn addCoverageCommand(
     output_dir: []const u8,
     artifact: *std.Build.Step.Compile,
 ) *std.Build.Step.Run {
+    // --include-pattern/--exclude-pattern are substring matches against the full
+    // source path recorded in DWARF; --include-path/--exclude-path require a
+    // path-component match that breaks under containerised CI checkouts.
+    // --collect-only defers reporting to the merge step, where one summary is
+    // produced from all artifacts together.
     const command = b.addSystemCommand(&.{
         kcov,
+        "--collect-only",
         "--clean",
-        "--dump-summary",
-        "--include-path=src",
-        "--exclude-path=tests,vendor,.zig-cache,zig-out",
+        "--include-pattern=/src/",
+        "--exclude-pattern=/tests/,/vendor/,/.zig-cache/,/zig-out/",
         output_dir,
     });
     command.addArtifactArg(artifact);
