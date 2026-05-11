@@ -1,6 +1,7 @@
 # yaml
 
 [![CI](https://github.com/ncode/yaml/actions/workflows/ci.yml/badge.svg)](https://github.com/ncode/yaml/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/ncode/yaml/graph/badge.svg?token=97Q2MPTNBJ)](https://codecov.io/gh/ncode/yaml)
 
 Native Zig YAML 1.2.2 library.
 

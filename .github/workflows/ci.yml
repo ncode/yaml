@@ -72,6 +72,13 @@ jobs:
       - name: Coverage
         run: zig build test-coverage -Duse-llvm=true -Dcoverage-threshold=85
 
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: zig-out/coverage/merged/cobertura.xml
+          fail_ci_if_error: false
+
       - name: Valgrind leak checks
         run: zig build test-valgrind -Duse-llvm=true
 
