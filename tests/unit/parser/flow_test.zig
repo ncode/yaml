@@ -1098,6 +1098,43 @@ test "parseTokens parses a trailing empty flow mapping value" {
     try std.testing.expect(event_stream.events[7] == .stream_end);
 }
 
+test "parseTokens preserves mixed flow sequence event equivalence" {
+    var token_stream = try scanner.scan(std.testing.allocator, "&root [plain, key: &node !<tag:example.com,2000:seq> [*node, {inner: value}], ? explicit : , : empty]\n");
+    defer token_stream.deinit();
+
+    var event_stream = try parseTokens(std.testing.allocator, token_stream.tokens);
+    defer event_stream.deinit();
+
+    const expected = [_]types.Event{
+        .stream_start,
+        .{ .document_start = .{} },
+        .{ .sequence_start = .{ .style = .flow, .anchor = "root" } },
+        .{ .scalar = .{ .value = "plain" } },
+        .{ .mapping_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "key" } },
+        .{ .sequence_start = .{ .style = .flow, .anchor = "node", .tag = "tag:example.com,2000:seq" } },
+        .{ .alias = "node" },
+        .{ .mapping_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "inner" } },
+        .{ .scalar = .{ .value = "value" } },
+        .mapping_end,
+        .sequence_end,
+        .mapping_end,
+        .{ .mapping_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "explicit" } },
+        .{ .scalar = .{ .value = "" } },
+        .mapping_end,
+        .{ .mapping_start = .{ .style = .flow } },
+        .{ .scalar = .{ .value = "" } },
+        .{ .scalar = .{ .value = "empty" } },
+        .mapping_end,
+        .sequence_end,
+        .{ .document_end = .{} },
+        .stream_end,
+    };
+    try std.testing.expectEqualDeep(&expected, event_stream.events);
+}
+
 test "parseTokens does not overallocate temporary flow sequence entry events" {
     const item_count = 96;
 
@@ -1118,7 +1155,7 @@ test "parseTokens does not overallocate temporary flow sequence entry events" {
     defer event_stream.deinit();
 
     try std.testing.expectEqual(@as(usize, item_count + 6), event_stream.events.len);
-    try std.testing.expect(counted.allocated_bytes <= input.items.len * 256);
+    try std.testing.expect(counted.allocated_bytes <= input.items.len * 72);
 }
 
 const CountingAllocator = struct {

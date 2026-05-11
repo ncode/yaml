@@ -189,26 +189,28 @@ fn appendSequenceEntryEvents(
         return true;
     }
 
-    var key_events: EventBuilder = .{};
-    defer key_events.deinit(allocator);
-    try key_events.ensureTotalCapacity(allocator, @min(end - index.*, 4));
-
+    const key_checkpoint = events.checkpoint();
+    var key_committed = false;
+    errdefer if (!key_committed) events.rollback(key_checkpoint);
     const key_start = index.*;
-    if (!try appendNodeEventsWithOptions(allocator, tokens, index, end, &key_events, depth, directives, .{
+    if (!try appendNodeEventsWithOptions(allocator, tokens, index, end, events, depth, directives, .{
         .allow_plain_indented_continuations = true,
-    })) return false;
+    })) {
+        events.rollback(key_checkpoint);
+        return false;
+    }
 
     token_cursor.skipComments(tokens, index, end);
     if (token_cursor.flowMappingValueFollowsLineBreak(tokens, index.*, end)) return ParseError.InvalidSyntax;
     if (index.* >= end or tokens[index.*] != .flow_mapping_value) {
-        try events.appendSlice(allocator, key_events.slice());
+        key_committed = true;
         return true;
     }
 
     try implicit_key.validateImplicitTokenKeyLength(tokens, key_start, index.*);
     index.* += 1;
-    try events.append(allocator, .{ .mapping_start = .{ .style = .flow } });
-    try events.appendSlice(allocator, key_events.slice());
+    try events.insert(allocator, key_checkpoint.len, .{ .mapping_start = .{ .style = .flow } });
+    key_committed = true;
 
     token_cursor.skipFlowInsignificant(tokens, index, end);
     if (token_cursor.isFlowSequenceEntryBoundary(tokens, index.*, end)) {

@@ -494,3 +494,17 @@ test "parseTokensWithStats reports private event stats" {
     try std.testing.expectEqual(@as(usize, 0), parsed.stats.current_nesting_depth);
     try std.testing.expect(!parsed.stats.malformed_nesting);
 }
+
+test "parseTokensWithStats reports flow sequence implicit mapping stats" {
+    var token_stream = try scanner.scan(std.testing.allocator, "[plain, key: [nested], tail]\n");
+    defer token_stream.deinit();
+
+    var parsed = try parseTokensWithStats(std.testing.allocator, token_stream.tokens);
+    defer parsed.stream.deinit();
+
+    try std.testing.expectEqual(parsed.stream.events.len, parsed.stats.event_count);
+    try std.testing.expectEqual(@as(usize, 6), parsed.stats.max_scalar_bytes);
+    try std.testing.expectEqual(@as(usize, 3), parsed.stats.max_nesting_depth);
+    try std.testing.expectEqual(@as(usize, 0), parsed.stats.current_nesting_depth);
+    try std.testing.expect(!parsed.stats.malformed_nesting);
+}
