@@ -28,6 +28,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # actions/checkout sets safe.directory under a temporary HOME that is
+      # reverted when the step ends, so subsequent steps run as root see the
+      # workspace as "not a git repository". Re-add it to the persistent config.
+      - name: Mark workspace as safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Install Zig
         uses: mlugg/setup-zig@v2
         with:

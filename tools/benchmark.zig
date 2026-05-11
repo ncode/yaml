@@ -39,6 +39,9 @@ const AllocationPath = enum {
     parser_events,
     composer_events,
     loader_events,
+    load_default,
+    load_failsafe_allow,
+    load_stream_default,
 
     fn label(self: AllocationPath) []const u8 {
         return switch (self) {
@@ -46,6 +49,9 @@ const AllocationPath = enum {
             .parser_events => "parser-events",
             .composer_events => "composer-events",
             .loader_events => "loader-events",
+            .load_default => "load-default",
+            .load_failsafe_allow => "load-failsafe-allow-duplicates",
+            .load_stream_default => "load-stream-default",
         };
     }
 };
@@ -55,7 +61,14 @@ const AllocationMetrics = struct {
     frees: usize,
     allocated_bytes: usize,
     freed_bytes: usize,
+    retained_bytes: usize,
+    peak_live_bytes: usize,
     checksum: u64,
+};
+
+const AllocationRun = struct {
+    checksum: u64,
+    retained_bytes: usize,
 };
 
 const conformance_subset =
@@ -101,6 +114,12 @@ pub fn main(init: std.process.Init) !void {
         try reportAllocations(allocator, stdout, fixture, .parser_events);
         try reportAllocations(allocator, stdout, fixture, .composer_events);
         try reportAllocations(allocator, stdout, fixture, .loader_events);
+        if (fixture.single_document) {
+            try reportAllocations(allocator, stdout, fixture, .load_default);
+            try reportAllocations(allocator, stdout, fixture, .load_failsafe_allow);
+        } else {
+            try reportAllocations(allocator, stdout, fixture, .load_stream_default);
+        }
     }
 
     try stdout.flush();
@@ -221,6 +240,22 @@ test "benchmark fixtures include comparison-derived hot paths" {
     try expectFixture(fixtures, "sequence-records-large");
     try expectFixture(fixtures, "alias-heavy");
     try expectFixture(fixtures, "scalar-heavy");
+}
+
+test "public load allocation metrics report retained and peak live bytes" {
+    const metrics = try measureAllocations(std.testing.allocator,
+        \\name: yaml
+        \\items:
+        \\  - one
+        \\  - two
+        \\
+    , .load_default);
+
+    try std.testing.expect(metrics.allocations > 0);
+    try std.testing.expect(metrics.allocated_bytes >= metrics.retained_bytes);
+    try std.testing.expect(metrics.peak_live_bytes >= metrics.retained_bytes);
+    try std.testing.expect(metrics.retained_bytes > 0);
+    try std.testing.expectEqual(metrics.allocated_bytes, metrics.freed_bytes);
 }
 
 fn expectFixture(fixtures: []const Fixture, name: []const u8) !void {
@@ -352,7 +387,7 @@ fn reportAllocations(
 ) !void {
     const metrics = try measureAllocations(allocator, fixture.input, allocation_path);
     try stdout.print(
-        "allocs input={s} bytes={} api={s} allocations={} frees={} allocated_bytes={} freed_bytes={} checksum={}\n",
+        "allocs input={s} bytes={} api={s} allocations={} frees={} allocated_bytes={} freed_bytes={} retained_bytes={} peak_live_bytes={} checksum={}\n",
         .{
             fixture.name,
             fixture.input.len,
@@ -361,6 +396,8 @@ fn reportAllocations(
             metrics.frees,
             metrics.allocated_bytes,
             metrics.freed_bytes,
+            metrics.retained_bytes,
+            metrics.peak_live_bytes,
             metrics.checksum,
         },
     );
@@ -395,11 +432,14 @@ fn measureAllocations(allocator: std.mem.Allocator, input: []const u8, allocatio
     var counter: CountingAllocator = .{ .child = allocator };
     const counted_allocator = counter.allocator();
 
-    const checksum = switch (allocation_path) {
-        .scanner => checksumScanner(try yaml_internal.scanner.scan(counted_allocator, input)),
-        .parser_events => checksumParserEvents(try parseEvents(counted_allocator, input)),
-        .composer_events => try measureComposerAllocations(allocator, counted_allocator, input),
-        .loader_events => try measureLoaderAllocations(allocator, counted_allocator, input),
+    const run: AllocationRun = switch (allocation_path) {
+        .scanner => .{ .checksum = checksumScanner(try yaml_internal.scanner.scan(counted_allocator, input)), .retained_bytes = counter.live_bytes },
+        .parser_events => .{ .checksum = checksumParserEvents(try parseEvents(counted_allocator, input)), .retained_bytes = counter.live_bytes },
+        .composer_events => .{ .checksum = try measureComposerAllocations(allocator, counted_allocator, input), .retained_bytes = counter.live_bytes },
+        .loader_events => .{ .checksum = try measureLoaderAllocations(allocator, counted_allocator, input), .retained_bytes = counter.live_bytes },
+        .load_default => try measurePublicLoadAllocations(&counter, input, true, .core, .reject),
+        .load_failsafe_allow => try measurePublicLoadAllocations(&counter, input, true, .failsafe, .allow),
+        .load_stream_default => try measurePublicLoadAllocations(&counter, input, false, .core, .reject),
     };
 
     return .{
@@ -407,7 +447,9 @@ fn measureAllocations(allocator: std.mem.Allocator, input: []const u8, allocatio
         .frees = counter.frees,
         .allocated_bytes = counter.allocated_bytes,
         .freed_bytes = counter.freed_bytes,
-        .checksum = checksum,
+        .retained_bytes = run.retained_bytes,
+        .peak_live_bytes = counter.peak_live_bytes,
+        .checksum = run.checksum,
     };
 }
 
@@ -435,6 +477,44 @@ fn measureLoaderAllocations(allocator: std.mem.Allocator, counted_allocator: std
         checksum +%= checksumNode(document);
     }
     return checksum;
+}
+
+fn measurePublicLoadAllocations(
+    counter: *CountingAllocator,
+    input: []const u8,
+    require_single_document: bool,
+    selected_schema: anytype,
+    duplicate_key_behavior: anytype,
+) !AllocationRun {
+    const counted_allocator = counter.allocator();
+
+    if (require_single_document) {
+        var document = try yaml_internal.load_api.loadWithOptions(counted_allocator, input, .{
+            .schema = selected_schema,
+            .duplicate_key_behavior = duplicate_key_behavior,
+        });
+        defer document.deinit();
+
+        return .{
+            .checksum = 1 +% checksumNode(document.root),
+            .retained_bytes = counter.live_bytes,
+        };
+    }
+
+    var stream = try yaml_internal.load_api.loadStreamWithOptions(counted_allocator, input, .{
+        .schema = selected_schema,
+        .duplicate_key_behavior = duplicate_key_behavior,
+    });
+    defer stream.deinit();
+
+    var checksum: u64 = stream.documents.len;
+    for (stream.documents) |document| {
+        checksum +%= checksumNode(document);
+    }
+    return .{
+        .checksum = checksum,
+        .retained_bytes = counter.live_bytes,
+    };
 }
 
 fn parseEvents(allocator: std.mem.Allocator, input: []const u8) !yaml_internal.parser.EventStream {
@@ -628,6 +708,8 @@ const CountingAllocator = struct {
     frees: usize = 0,
     allocated_bytes: usize = 0,
     freed_bytes: usize = 0,
+    live_bytes: usize = 0,
+    peak_live_bytes: usize = 0,
 
     fn allocator(self: *CountingAllocator) std.mem.Allocator {
         return .{
@@ -646,6 +728,7 @@ const CountingAllocator = struct {
         const result = self.child.rawAlloc(len, alignment, ret_addr) orelse return null;
         self.allocations += 1;
         self.allocated_bytes += len;
+        self.addLiveBytes(len);
         return result;
     }
 
@@ -667,14 +750,24 @@ const CountingAllocator = struct {
         const self: *CountingAllocator = @ptrCast(@alignCast(context));
         self.frees += 1;
         self.freed_bytes += memory.len;
+        self.live_bytes -= memory.len;
         self.child.rawFree(memory, alignment, ret_addr);
     }
 
     fn countResize(self: *CountingAllocator, old_len: usize, new_len: usize) void {
         if (new_len > old_len) {
-            self.allocated_bytes += new_len - old_len;
+            const delta = new_len - old_len;
+            self.allocated_bytes += delta;
+            self.addLiveBytes(delta);
         } else {
-            self.freed_bytes += old_len - new_len;
+            const delta = old_len - new_len;
+            self.freed_bytes += delta;
+            self.live_bytes -= delta;
         }
+    }
+
+    fn addLiveBytes(self: *CountingAllocator, len: usize) void {
+        self.live_bytes += len;
+        self.peak_live_bytes = @max(self.peak_live_bytes, self.live_bytes);
     }
 };
