@@ -195,7 +195,7 @@ pub fn parseTokensWithStats(allocator: std.mem.Allocator, tokens: []const scanne
         ScalarDocumentTokens{ .scalar = null };
 
     var events: EventBuilder = .{};
-    try events.ensureTotalCapacity(arena_allocator, tokens.len);
+    try events.ensureTotalCapacity(arena_allocator, @min(tokens.len, 32));
 
     try events.append(arena_allocator, .stream_start);
 

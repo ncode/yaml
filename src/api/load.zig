@@ -15,7 +15,9 @@ const parse = @import("parse.zig");
 const loader = @import("../loader/loader.zig");
 const scanner = @import("../scanner/scanner.zig");
 const schema = @import("../schema/schema.zig");
+const schema_tag = @import("../schema/tag.zig");
 const simple_fast_path = @import("../parser/simple_fast_path.zig");
+const parser_tag = @import("../parser/tag.zig");
 const value = @import("../value/value.zig");
 
 const Error = diagnostics.Error;
@@ -183,6 +185,26 @@ const StrictShapeStats = struct {
     max_nesting_depth: usize,
     max_scalar_bytes: usize,
     node_count: usize,
+    root_child_count: usize = 0,
+    nested_mapping_values: bool = false,
+};
+
+const StrictScalarToken = struct {
+    value: []const u8,
+    tag: ?[]const u8 = null,
+};
+
+const StrictScalarRole = enum {
+    key,
+    value,
+};
+
+const StrictNodeStats = struct {
+    event_count: usize,
+    max_nesting_depth: usize,
+    max_scalar_bytes: usize = 0,
+    node_count: usize,
+    root_child_count: usize = 0,
 };
 
 fn mayBeStrictSimpleInput(input: []const u8) bool {
@@ -198,23 +220,13 @@ fn mayBeStrictSimpleInput(input: []const u8) bool {
             if (trimmed[0] == '#') return false;
             if (trimmed[0] == '%') return false;
             if (std.mem.startsWith(u8, trimmed, "---") or std.mem.startsWith(u8, trimmed, "...")) return false;
-            if (std.mem.indexOfAny(u8, trimmed, "&*!'\"[]{}|>%#") != null) return false;
-            if (mappingValueIsOmitted(trimmed)) return false;
+            if (std.mem.indexOfAny(u8, trimmed, "&*'\"[]{}|>%#") != null) return false;
             if (line.len != trimmed.len and !std.mem.containsAtLeast(u8, trimmed, 1, ":")) return false;
         }
 
         start = if (end < input.len) end + 1 else end;
     }
     return true;
-}
-
-fn mappingValueIsOmitted(line: []const u8) bool {
-    if (std.mem.indexOfScalar(u8, line, ':')) |colon| {
-        var cursor = colon + 1;
-        while (cursor < line.len and (line[cursor] == ' ' or line[cursor] == '\t')) : (cursor += 1) {}
-        return cursor == line.len;
-    }
-    return false;
 }
 
 fn strictShapeStats(shape: StrictSimpleShape) StrictShapeStats {
@@ -231,18 +243,28 @@ fn strictSimpleShape(tokens: []const scanner.Token) ?StrictSimpleShape {
 }
 
 fn strictSimpleScalarShape(tokens: []const scanner.Token) ?StrictShapeStats {
-    if (tokens.len != 4 or tokens[0] != .stream_start or tokens[1] != .indent or tokens[1].indent != 0 or tokens[2] != .scalar or tokens[3] != .stream_end) return null;
-    if (!simple_fast_path.isSimplePlainScalarToken(tokens[2].scalar)) return null;
+    if (tokens.len < 4 or tokens[0] != .stream_start or tokens[tokens.len - 1] != .stream_end) return null;
+    var index: usize = 1;
+    if (tokens[index] != .indent or tokens[index].indent != 0) return null;
+    index += 1;
+
+    const scalar_token = readStrictScalarToken(tokens, &index, tokens.len - 1, .value) orelse return null;
+    if (index != tokens.len - 1) return null;
 
     return .{
         .event_count = 5,
         .max_nesting_depth = 0,
-        .max_scalar_bytes = tokens[2].scalar.len,
+        .max_scalar_bytes = scalar_token.value.len,
         .node_count = 1,
     };
 }
 
 fn strictSimpleBlockMappingShape(tokens: []const scanner.Token) ?StrictShapeStats {
+    if (strictFlatBlockMappingShape(tokens)) |stats| return stats;
+    return strictNestedBlockMappingShape(tokens);
+}
+
+fn strictFlatBlockMappingShape(tokens: []const scanner.Token) ?StrictShapeStats {
     if (tokens.len < 6 or tokens[0] != .stream_start or tokens[tokens.len - 1] != .stream_end) return null;
 
     var pair_count: usize = 0;
@@ -252,16 +274,14 @@ fn strictSimpleBlockMappingShape(tokens: []const scanner.Token) ?StrictShapeStat
         if (tokens[index] != .indent or tokens[index].indent != 0) return null;
         index += 1;
 
-        if (index >= tokens.len - 1 or tokens[index] != .scalar or !simple_fast_path.isSimpleBlockMappingKeyToken(tokens[index].scalar)) return null;
-        max_scalar_bytes = @max(max_scalar_bytes, tokens[index].scalar.len);
-        index += 1;
+        const key = readStrictScalarToken(tokens, &index, tokens.len - 1, .key) orelse return null;
+        max_scalar_bytes = @max(max_scalar_bytes, key.value.len);
 
         if (index >= tokens.len - 1 or tokens[index] != .block_mapping_value) return null;
         index += 1;
 
-        if (index >= tokens.len - 1 or tokens[index] != .scalar or !simple_fast_path.isSimplePlainScalarToken(tokens[index].scalar)) return null;
-        max_scalar_bytes = @max(max_scalar_bytes, tokens[index].scalar.len);
-        index += 1;
+        const scalar_value = readStrictScalarToken(tokens, &index, tokens.len - 1, .value) orelse return null;
+        max_scalar_bytes = @max(max_scalar_bytes, scalar_value.value.len);
 
         pair_count += 1;
     }
@@ -272,7 +292,83 @@ fn strictSimpleBlockMappingShape(tokens: []const scanner.Token) ?StrictShapeStat
         .max_nesting_depth = 1,
         .max_scalar_bytes = max_scalar_bytes,
         .node_count = 1 + pair_count * 2,
+        .root_child_count = pair_count,
     };
+}
+
+fn strictNestedBlockMappingShape(tokens: []const scanner.Token) ?StrictShapeStats {
+    if (tokens.len < 6 or tokens[0] != .stream_start or tokens[tokens.len - 1] != .stream_end) return null;
+
+    var index: usize = 1;
+    const mapping = strictBlockMappingNodeStats(tokens, &index, tokens.len - 1, 0, 1) orelse return null;
+    if (index != tokens.len - 1) return null;
+
+    return .{
+        .event_count = 4 + mapping.event_count,
+        .max_nesting_depth = mapping.max_nesting_depth,
+        .max_scalar_bytes = mapping.max_scalar_bytes,
+        .node_count = mapping.node_count,
+        .root_child_count = mapping.root_child_count,
+        .nested_mapping_values = true,
+    };
+}
+
+fn strictBlockMappingNodeStats(
+    tokens: []const scanner.Token,
+    index: *usize,
+    end: usize,
+    mapping_indent: usize,
+    depth: usize,
+) ?StrictNodeStats {
+    var stats: StrictNodeStats = .{
+        .event_count = 2,
+        .max_nesting_depth = depth,
+        .node_count = 1,
+    };
+    var pair_count: usize = 0;
+
+    while (index.* < end) {
+        if (tokens[index.*] != .indent) break;
+        const indent = tokens[index.*].indent;
+        if (indent < mapping_indent) break;
+        if (indent != mapping_indent) return null;
+        index.* += 1;
+
+        const key = readStrictScalarToken(tokens, index, end, .key) orelse return null;
+        includeStrictScalarStats(&stats, key);
+
+        if (index.* >= end or tokens[index.*] != .block_mapping_value) return null;
+        index.* += 1;
+
+        var value_index = index.*;
+        if (readStrictScalarToken(tokens, &value_index, end, .value)) |scalar_value| {
+            index.* = value_index;
+            includeStrictScalarStats(&stats, scalar_value);
+        } else {
+            if (index.* >= end or tokens[index.*] != .indent or tokens[index.*].indent <= mapping_indent) return null;
+            const nested = strictBlockMappingNodeStats(tokens, index, end, tokens[index.*].indent, depth + 1) orelse return null;
+            includeStrictNodeStats(&stats, nested);
+        }
+
+        pair_count += 1;
+    }
+
+    if (pair_count == 0) return null;
+    stats.root_child_count = pair_count;
+    return stats;
+}
+
+fn includeStrictScalarStats(stats: *StrictNodeStats, scalar_token: StrictScalarToken) void {
+    stats.event_count += 1;
+    stats.node_count += 1;
+    stats.max_scalar_bytes = @max(stats.max_scalar_bytes, scalar_token.value.len);
+}
+
+fn includeStrictNodeStats(stats: *StrictNodeStats, node_stats: StrictNodeStats) void {
+    stats.event_count += node_stats.event_count;
+    stats.node_count += node_stats.node_count;
+    stats.max_scalar_bytes = @max(stats.max_scalar_bytes, node_stats.max_scalar_bytes);
+    stats.max_nesting_depth = @max(stats.max_nesting_depth, node_stats.max_nesting_depth);
 }
 
 fn strictSimpleBlockSequenceShape(tokens: []const scanner.Token) ?StrictShapeStats {
@@ -290,19 +386,18 @@ fn strictSimpleBlockSequenceShape(tokens: []const scanner.Token) ?StrictShapeSta
         if (index >= tokens.len - 1 or tokens[index] != .block_sequence_entry) return null;
         index += 1;
 
-        if (index >= tokens.len - 1 or tokens[index] != .scalar or !simple_fast_path.isSimplePlainScalarToken(tokens[index].scalar)) return null;
-        if (index + 1 < tokens.len - 1 and tokens[index + 1] == .block_mapping_value) {
-            if (!simple_fast_path.isSimpleBlockMappingKeyToken(tokens[index].scalar)) return null;
+        const first = readStrictScalarToken(tokens, &index, tokens.len - 1, .value) orelse return null;
+        if (index < tokens.len - 1 and tokens[index] == .block_mapping_value) {
+            if (!simple_fast_path.isSimpleBlockMappingKeyToken(first.value)) return null;
             max_nesting_depth = 2;
             item_event_count += 2;
             node_count += 3;
-            max_scalar_bytes = @max(max_scalar_bytes, tokens[index].scalar.len);
-            index += 2;
-
-            if (index >= tokens.len - 1 or tokens[index] != .scalar or !simple_fast_path.isSimplePlainScalarToken(tokens[index].scalar)) return null;
-            item_event_count += 2;
-            max_scalar_bytes = @max(max_scalar_bytes, tokens[index].scalar.len);
+            max_scalar_bytes = @max(max_scalar_bytes, first.value.len);
             index += 1;
+
+            const first_value = readStrictScalarToken(tokens, &index, tokens.len - 1, .value) orelse return null;
+            item_event_count += 2;
+            max_scalar_bytes = @max(max_scalar_bytes, first_value.value.len);
 
             var mapping_indent: ?usize = null;
             while (index < tokens.len - 1) {
@@ -316,22 +411,19 @@ fn strictSimpleBlockSequenceShape(tokens: []const scanner.Token) ?StrictShapeSta
                 }
                 index += 1;
 
-                if (index >= tokens.len - 1 or tokens[index] != .scalar or !simple_fast_path.isSimpleBlockMappingKeyToken(tokens[index].scalar)) return null;
-                max_scalar_bytes = @max(max_scalar_bytes, tokens[index].scalar.len);
-                index += 1;
+                const key = readStrictScalarToken(tokens, &index, tokens.len - 1, .key) orelse return null;
+                max_scalar_bytes = @max(max_scalar_bytes, key.value.len);
                 if (index >= tokens.len - 1 or tokens[index] != .block_mapping_value) return null;
                 index += 1;
-                if (index >= tokens.len - 1 or tokens[index] != .scalar or !simple_fast_path.isSimplePlainScalarToken(tokens[index].scalar)) return null;
-                max_scalar_bytes = @max(max_scalar_bytes, tokens[index].scalar.len);
+                const scalar_value = readStrictScalarToken(tokens, &index, tokens.len - 1, .value) orelse return null;
+                max_scalar_bytes = @max(max_scalar_bytes, scalar_value.value.len);
                 item_event_count += 2;
                 node_count += 2;
-                index += 1;
             }
         } else {
-            max_scalar_bytes = @max(max_scalar_bytes, tokens[index].scalar.len);
+            max_scalar_bytes = @max(max_scalar_bytes, first.value.len);
             item_event_count += 1;
             node_count += 1;
-            index += 1;
         }
 
         item_count += 1;
@@ -343,7 +435,43 @@ fn strictSimpleBlockSequenceShape(tokens: []const scanner.Token) ?StrictShapeSta
         .max_nesting_depth = max_nesting_depth,
         .max_scalar_bytes = max_scalar_bytes,
         .node_count = node_count,
+        .root_child_count = item_count,
     };
+}
+
+fn readStrictScalarToken(tokens: []const scanner.Token, index: *usize, end: usize, role: StrictScalarRole) ?StrictScalarToken {
+    var cursor = index.*;
+    if (cursor >= end) return null;
+
+    const tag_value = if (tokens[cursor] == .tag) value: {
+        if (!isStrictSimpleTagToken(tokens[cursor].tag)) return null;
+        const raw = tokens[cursor].tag;
+        cursor += 1;
+        break :value raw;
+    } else null;
+
+    if (cursor >= end or tokens[cursor] != .scalar) return null;
+    const scalar_value = tokens[cursor].scalar;
+    const supported = switch (role) {
+        .key => simple_fast_path.isSimpleBlockMappingKeyToken(scalar_value),
+        .value => simple_fast_path.isSimplePlainScalarToken(scalar_value),
+    };
+    if (!supported) return null;
+
+    index.* = cursor + 1;
+    return .{ .value = scalar_value, .tag = tag_value };
+}
+
+fn isStrictSimpleTagToken(raw: []const u8) bool {
+    if (raw.len == 0 or raw[0] != '!') return false;
+    if (std.mem.eql(u8, raw, "!")) return true;
+    if (std.mem.indexOfAny(u8, raw, "<>%")) |_| return false;
+
+    if (std.mem.startsWith(u8, raw, "!!")) {
+        return raw.len > 2 and std.mem.indexOfScalar(u8, raw[2..], '!') == null;
+    }
+
+    return std.mem.indexOfScalar(u8, raw[1..], '!') == null;
 }
 
 fn checkStrictShapeLimits(input: []const u8, options: LoadOptions, shape: StrictSimpleShape) Error!void {
@@ -379,24 +507,34 @@ const StrictSimpleBuilder = struct {
 
     fn construct(self: *StrictSimpleBuilder, tokens: []const scanner.Token, shape: StrictSimpleShape) Error!*const value.Node {
         return switch (shape) {
-            .scalar => self.constructPlainScalar(tokens[2].scalar),
-            .mapping => self.constructBlockMapping(tokens),
-            .sequence => self.constructBlockSequence(tokens),
+            .scalar => self.constructRootScalar(tokens),
+            .mapping => |stats| if (stats.nested_mapping_values)
+                self.constructNestedBlockMapping(tokens, stats.root_child_count)
+            else
+                self.constructFlatBlockMapping(tokens, stats.root_child_count),
+            .sequence => |stats| self.constructBlockSequence(tokens, stats.root_child_count),
         };
     }
 
-    fn constructBlockMapping(self: *StrictSimpleBuilder, tokens: []const scanner.Token) Error!*const value.Node {
-        const pair_count = (tokens.len - 2) / 4;
+    fn constructRootScalar(self: *StrictSimpleBuilder, tokens: []const scanner.Token) Error!*const value.Node {
+        var index: usize = 2;
+        const scalar_token = readStrictScalarToken(tokens, &index, tokens.len - 1, .value) orelse return ParseError.InvalidSyntax;
+        return self.constructPlainScalar(scalar_token);
+    }
+
+    fn constructFlatBlockMapping(self: *StrictSimpleBuilder, tokens: []const scanner.Token, pair_count: usize) Error!*const value.Node {
         const pairs = try self.arena_allocator.alloc(value.MappingPair, pair_count);
 
         var pair_index: usize = 0;
         var token_index: usize = 1;
         while (token_index < tokens.len - 1) : (pair_index += 1) {
             token_index += 1;
-            const key = try self.constructPlainScalar(tokens[token_index].scalar);
-            token_index += 2;
-            const node_value = try self.constructPlainScalar(tokens[token_index].scalar);
+            const key_token = readStrictScalarToken(tokens, &token_index, tokens.len - 1, .key) orelse return ParseError.InvalidSyntax;
+            const key = try self.constructPlainScalar(key_token);
+            if (token_index >= tokens.len - 1 or tokens[token_index] != .block_mapping_value) return ParseError.InvalidSyntax;
             token_index += 1;
+            const value_token = readStrictScalarToken(tokens, &token_index, tokens.len - 1, .value) orelse return ParseError.InvalidSyntax;
+            const node_value = try self.constructPlainScalar(value_token);
             pairs[pair_index] = .{ .key = key, .value = node_value };
         }
 
@@ -407,19 +545,71 @@ const StrictSimpleBuilder = struct {
         return node;
     }
 
-    fn constructBlockSequence(self: *StrictSimpleBuilder, tokens: []const scanner.Token) Error!*const value.Node {
-        const item_count = strictSequenceItemCount(tokens);
+    fn constructNestedBlockMapping(self: *StrictSimpleBuilder, tokens: []const scanner.Token, pair_count: usize) Error!*const value.Node {
+        var token_index: usize = 1;
+        return self.constructBlockMappingAt(tokens, &token_index, tokens.len - 1, 0, pair_count);
+    }
+
+    fn constructBlockMappingAt(
+        self: *StrictSimpleBuilder,
+        tokens: []const scanner.Token,
+        index: *usize,
+        end: usize,
+        mapping_indent: usize,
+        pair_capacity: usize,
+    ) Error!*const value.Node {
+        var pairs: std.ArrayList(value.MappingPair) = .empty;
+        errdefer pairs.deinit(self.arena_allocator);
+        try pairs.ensureTotalCapacity(self.arena_allocator, pair_capacity);
+
+        while (index.* < end) {
+            if (tokens[index.*] != .indent) break;
+            const indent = tokens[index.*].indent;
+            if (indent < mapping_indent) break;
+            if (indent != mapping_indent) return ParseError.InvalidSyntax;
+            index.* += 1;
+
+            const key_token = readStrictScalarToken(tokens, index, end, .key) orelse return ParseError.InvalidSyntax;
+            const key = try self.constructPlainScalar(key_token);
+
+            if (index.* >= end or tokens[index.*] != .block_mapping_value) return ParseError.InvalidSyntax;
+            index.* += 1;
+
+            var value_index = index.*;
+            const node_value = if (readStrictScalarToken(tokens, &value_index, end, .value)) |value_token| value: {
+                index.* = value_index;
+                break :value try self.constructPlainScalar(value_token);
+            } else value: {
+                if (index.* >= end or tokens[index.*] != .indent or tokens[index.*].indent <= mapping_indent) return ParseError.InvalidSyntax;
+                break :value try self.constructBlockMappingAt(tokens, index, end, tokens[index.*].indent, 0);
+            };
+
+            try pairs.append(self.arena_allocator, .{ .key = key, .value = node_value });
+        }
+
+        const owned_pairs = try pairs.toOwnedSlice(self.arena_allocator);
+        try self.validateMappingPairs(owned_pairs);
+
+        const node = try self.nodes.create();
+        node.* = .{ .mapping = .{ .pairs = owned_pairs } };
+        return node;
+    }
+
+    fn constructBlockSequence(self: *StrictSimpleBuilder, tokens: []const scanner.Token, item_count: usize) Error!*const value.Node {
         const items = try self.arena_allocator.alloc(*const value.Node, item_count);
 
         var item_index: usize = 0;
         var token_index: usize = 1;
         while (token_index < tokens.len - 1) : (item_index += 1) {
             token_index += 2;
-            if (token_index + 1 < tokens.len - 1 and tokens[token_index + 1] == .block_mapping_value) {
+            const item_start = token_index;
+            const first = readStrictScalarToken(tokens, &token_index, tokens.len - 1, .value) orelse return ParseError.InvalidSyntax;
+            if (token_index < tokens.len - 1 and tokens[token_index] == .block_mapping_value) {
+                if (!simple_fast_path.isSimpleBlockMappingKeyToken(first.value)) return ParseError.InvalidSyntax;
+                token_index = item_start;
                 items[item_index] = try self.constructCompactMappingItem(tokens, &token_index);
             } else {
-                items[item_index] = try self.constructPlainScalar(tokens[token_index].scalar);
-                token_index += 1;
+                items[item_index] = try self.constructPlainScalar(first);
             }
         }
 
@@ -433,10 +623,12 @@ const StrictSimpleBuilder = struct {
         errdefer pairs.deinit(self.arena_allocator);
 
         while (true) {
-            const key = try self.constructPlainScalar(tokens[index.*].scalar);
-            index.* += 2;
-            const node_value = try self.constructPlainScalar(tokens[index.*].scalar);
+            const key_token = readStrictScalarToken(tokens, index, tokens.len - 1, .key) orelse return ParseError.InvalidSyntax;
+            const key = try self.constructPlainScalar(key_token);
+            if (index.* >= tokens.len - 1 or tokens[index.*] != .block_mapping_value) return ParseError.InvalidSyntax;
             index.* += 1;
+            const value_token = readStrictScalarToken(tokens, index, tokens.len - 1, .value) orelse return ParseError.InvalidSyntax;
+            const node_value = try self.constructPlainScalar(value_token);
             try pairs.append(self.arena_allocator, .{ .key = key, .value = node_value });
 
             if (index.* >= tokens.len - 1 or tokens[index.*] != .indent or tokens[index.*].indent == 0) break;
@@ -451,30 +643,61 @@ const StrictSimpleBuilder = struct {
         return node;
     }
 
-    fn constructPlainScalar(self: *StrictSimpleBuilder, scalar_value: []const u8) Error!*const value.Node {
+    fn constructPlainScalar(self: *StrictSimpleBuilder, scalar_token: StrictScalarToken) Error!*const value.Node {
         const node = try self.nodes.create();
-        node.* = try self.constructPlainScalarNode(scalar_value);
+        node.* = try self.constructPlainScalarNode(scalar_token);
         return node;
     }
 
-    fn constructPlainScalarNode(self: *StrictSimpleBuilder, scalar_value: []const u8) Error!value.Node {
-        const resolved = schema.resolveScalar(self.options.schema, scalar_value, true, null) catch |err| {
+    fn constructPlainScalarNode(self: *StrictSimpleBuilder, scalar_token: StrictScalarToken) Error!value.Node {
+        const resolved_tag = try self.resolveTag(scalar_token.tag);
+        try self.validateScalarTag(resolved_tag, scalar_token.value);
+
+        const resolved = schema.resolveScalar(self.options.schema, scalar_token.value, true, resolved_tag) catch |err| {
             setLoadFailureDiagnostic(self.input, self.options, .invalid_scalar_tag, err);
             return err;
         };
 
         if (resolved) |resolved_scalar| {
             return switch (resolved_scalar) {
-                .null_value => .{ .null_value = .{} },
-                .bool_value => |bool_value| .{ .bool_value = .{ .value = bool_value } },
-                .int_value => |int_value| .{ .int_value = .{ .value = int_value } },
-                .float_value => |float_value| .{ .float_value = .{ .value = float_value } },
+                .null_value => .{ .null_value = .{ .tag = resolved_tag } },
+                .bool_value => |bool_value| .{ .bool_value = .{ .value = bool_value, .tag = resolved_tag } },
+                .int_value => |int_value| .{ .int_value = .{ .value = int_value, .tag = resolved_tag } },
+                .float_value => |float_value| .{ .float_value = .{ .value = float_value, .tag = resolved_tag } },
             };
         }
 
         return .{ .scalar = .{
-            .value = try self.arena_allocator.dupe(u8, scalar_value),
+            .value = try self.arena_allocator.dupe(u8, scalar_token.value),
+            .tag = resolved_tag,
         } };
+    }
+
+    fn resolveTag(self: *StrictSimpleBuilder, raw_tag: ?[]const u8) Error!?[]const u8 {
+        const tag_value = raw_tag orelse return null;
+        return parser_tag.resolve(self.arena_allocator, &.{}, tag_value) catch |err| {
+            setLoadFailureDiagnostic(self.input, self.options, .invalid_graph, err);
+            return err;
+        };
+    }
+
+    fn validateScalarTag(self: *StrictSimpleBuilder, resolved_tag: ?[]const u8, scalar_value: []const u8) Error!void {
+        schema_tag.validateStandardTagKind(resolved_tag, .scalar) catch |err| {
+            setLoadFailureDiagnostic(self.input, self.options, .invalid_standard_tag, err);
+            return err;
+        };
+        if (self.options.unknown_tag_behavior == .reject and schema_tag.isUnknownTag(resolved_tag)) {
+            setLoadFailureDiagnostic(self.input, self.options, .unknown_tag, ParseError.InvalidSyntax);
+            return ParseError.InvalidSyntax;
+        }
+        schema_tag.validateStandardBinaryContent(resolved_tag, scalar_value) catch |err| {
+            setLoadFailureDiagnostic(self.input, self.options, .invalid_standard_tag, err);
+            return err;
+        };
+        schema_tag.validateStandardTimestampContent(resolved_tag, scalar_value) catch |err| {
+            setLoadFailureDiagnostic(self.input, self.options, .invalid_standard_tag, err);
+            return err;
+        };
     }
 
     fn validateMappingPairs(self: *StrictSimpleBuilder, pairs: []const value.MappingPair) Error!void {
@@ -485,23 +708,6 @@ const StrictSimpleBuilder = struct {
         };
     }
 };
-
-fn strictSequenceItemCount(tokens: []const scanner.Token) usize {
-    var count: usize = 0;
-    var index: usize = 1;
-    while (index < tokens.len - 1) : (count += 1) {
-        index += 2;
-        if (index + 1 < tokens.len - 1 and tokens[index + 1] == .block_mapping_value) {
-            index += 3;
-            while (index < tokens.len - 1 and tokens[index] == .indent and tokens[index].indent != 0) {
-                index += 4;
-            }
-        } else {
-            index += 1;
-        }
-    }
-    return count;
-}
 
 fn setLimitDiagnostic(input: []const u8, offset: usize, options: LoadOptions, message: []const u8) void {
     if (options.diagnostic) |diagnostic| {
@@ -596,10 +802,39 @@ test "load fast path declines aliases for fallback" {
     try std.testing.expect(loaded == null);
 }
 
+test "load fast path declines alias-heavy input for fallback" {
+    const input =
+        \\- &a0 value0
+        \\- *a0
+        \\- &a1 value1
+        \\- *a1
+        \\
+    ;
+
+    const fast = try tryStrictSimpleLoadStream(std.testing.allocator, input, .{});
+    if (fast) |loaded| {
+        var owned = loaded;
+        defer owned.deinit();
+        return error.ExpectedFallback;
+    }
+
+    var stream = try loadStreamWithOptions(std.testing.allocator, input, .{});
+    defer stream.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), stream.documents.len);
+    const root = stream.documents[0];
+    try std.testing.expect(root.* == .sequence);
+    try std.testing.expectEqual(@as(usize, 4), root.sequence.items.len);
+    try std.testing.expectEqual(root.sequence.items[0], root.sequence.items[1]);
+    try std.testing.expectEqual(root.sequence.items[2], root.sequence.items[3]);
+}
+
 test "strict simple load fast path matches forced fallback" {
     const cases = [_][]const u8{
         "plain\n",
+        "!!str value\n",
         "name: yaml\nversion: 1\n",
+        "name: yaml\nfeatures:\n  parser: true\n  loader: true\n",
         "- one\n- two\n",
         "- id: 1\n  name: record-1\n- id: 2\n  name: record-2\n",
     };
@@ -619,7 +854,6 @@ test "strict simple load fast path declines unsupported shapes" {
     const cases = [_][]const u8{
         "*anchor\n",
         "&anchor value\n",
-        "!!str value\n",
         "%YAML 1.2\n---\nvalue\n",
         "--- value\n",
         "key: value # comment\n",
@@ -628,12 +862,16 @@ test "strict simple load fast path declines unsupported shapes" {
         "[one, two]\n",
         "key: first\n  second\n",
         "key:\n",
-        "outer:\n  inner: value\n",
         "-\n  - nested\n",
     };
 
     for (cases) |input| {
         const fast = try tryStrictSimpleLoadStream(std.testing.allocator, input, .{});
+        if (fast) |loaded| {
+            var owned = loaded;
+            defer owned.deinit();
+            return error.ExpectedFallback;
+        }
         try std.testing.expect(fast == null);
     }
 }
@@ -663,6 +901,9 @@ test "strict simple load fast path cleans up accepted and declined allocation fa
 fn checkStrictSimpleLoadAllocationFailure(failing_allocator: std.mem.Allocator) !void {
     var accepted = (try tryStrictSimpleLoadStream(failing_allocator, "name: yaml\nversion: 1\n", .{})).?;
     defer accepted.deinit();
+
+    var tagged = (try tryStrictSimpleLoadStream(failing_allocator, "name: !local yaml\nversion: !!int 1\n", .{})).?;
+    defer tagged.deinit();
 
     const declined = try tryStrictSimpleLoadStream(failing_allocator, "name: [yaml]\n", .{});
     try std.testing.expect(declined == null);
@@ -731,6 +972,73 @@ test "strict simple load fast path preserves schema duplicate key and limit beha
         .diagnostic = &diagnostic,
     }));
     try std.testing.expectEqualStrings("loader exceeded configured document count limit", diagnostic.message);
+}
+
+test "strict simple load fast path preserves unknown tag behavior" {
+    var preserved = (try tryStrictSimpleLoadStream(std.testing.allocator, "!local value\n", .{})) orelse return error.ExpectedDirectLoad;
+    defer preserved.deinit();
+    try std.testing.expect(preserved.documents[0].* == .scalar);
+    try std.testing.expectEqualStrings("value", preserved.documents[0].scalar.value);
+    try std.testing.expectEqualStrings("!local", preserved.documents[0].scalar.tag.?);
+
+    var standard = (try tryStrictSimpleLoadStream(std.testing.allocator, "!!str true\n", .{})) orelse return error.ExpectedDirectLoad;
+    defer standard.deinit();
+    try std.testing.expect(standard.documents[0].* == .scalar);
+    try std.testing.expectEqualStrings("true", standard.documents[0].scalar.value);
+    try std.testing.expectEqualStrings("tag:yaml.org,2002:str", standard.documents[0].scalar.tag.?);
+
+    var diagnostic: diagnostics.Diagnostic = .{};
+    try std.testing.expectError(ParseError.InvalidSyntax, tryStrictSimpleLoadStream(std.testing.allocator, "!local value\n", .{
+        .unknown_tag_behavior = .reject,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("loader rejected unknown tag", diagnostic.message);
+}
+
+test "strict simple load fast path matches forced fallback malformed diagnostics" {
+    const cases = [_][]const u8{
+        "!!int not-int\n",
+        "!!seq value\n",
+        "!!binary SGVsbG8\n",
+    };
+
+    for (cases) |input| {
+        const direct = try expectStrictSimpleLoadError(input);
+        const fallback = try expectFallbackLoadError(input);
+
+        try std.testing.expectEqual(fallback.err, direct.err);
+        try std.testing.expectEqualStrings(fallback.diagnostic.message, direct.diagnostic.message);
+        try std.testing.expectEqual(fallback.diagnostic.offset, direct.diagnostic.offset);
+        try std.testing.expectEqual(fallback.diagnostic.line, direct.diagnostic.line);
+        try std.testing.expectEqual(fallback.diagnostic.column, direct.diagnostic.column);
+    }
+}
+
+const LoadErrorResult = struct {
+    err: Error,
+    diagnostic: diagnostics.Diagnostic,
+};
+
+fn expectStrictSimpleLoadError(input: []const u8) !LoadErrorResult {
+    var diagnostic: diagnostics.Diagnostic = .{};
+    if (tryStrictSimpleLoadStream(std.testing.allocator, input, .{ .diagnostic = &diagnostic })) |loaded| {
+        var owned = loaded orelse return error.ExpectedDirectLoad;
+        owned.deinit();
+        return error.ExpectedLoadFailure;
+    } else |err| {
+        return .{ .err = err, .diagnostic = diagnostic };
+    }
+}
+
+fn expectFallbackLoadError(input: []const u8) !LoadErrorResult {
+    var diagnostic: diagnostics.Diagnostic = .{};
+    if (loadStreamViaEvents(std.testing.allocator, input, .{ .diagnostic = &diagnostic })) |loaded| {
+        var owned = loaded;
+        owned.deinit();
+        return error.ExpectedLoadFailure;
+    } else |err| {
+        return .{ .err = err, .diagnostic = diagnostic };
+    }
 }
 
 fn expectLoadedStreamsEqual(actual: *const LoadedStream, expected: *const LoadedStream) !void {
