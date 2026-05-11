@@ -30,6 +30,22 @@ test "parseEvents preserves escaped whitespace before folded double quoted line 
     try std.testing.expectEqualStrings("kept \xc2\xa0 next", stream.events[2].scalar.value);
 }
 
+test "parseEvents owns flow sequence speculative event strings" {
+    const input = try std.testing.allocator.dupe(u8, "&root [plain, key: &node !<tag:example.com,2000:seq> [*node]]\n");
+    defer std.testing.allocator.free(input);
+
+    var stream = try parseEvents(std.testing.allocator, input);
+    defer stream.deinit();
+    @memset(input, 'x');
+
+    try std.testing.expectEqualStrings("root", stream.events[2].sequence_start.anchor.?);
+    try std.testing.expectEqualStrings("plain", stream.events[3].scalar.value);
+    try std.testing.expectEqualStrings("key", stream.events[5].scalar.value);
+    try std.testing.expectEqualStrings("node", stream.events[6].sequence_start.anchor.?);
+    try std.testing.expectEqualStrings("tag:example.com,2000:seq", stream.events[6].sequence_start.tag.?);
+    try std.testing.expectEqualStrings("node", stream.events[7].alias);
+}
+
 test "Parser.init reports token and event count limit diagnostics" {
     const input =
         \\- one
@@ -78,6 +94,30 @@ test "Parser.init reports input scalar and nesting limit diagnostics" {
     }));
     try std.testing.expectEqualStrings("nesting depth exceeds configured limit", diagnostic.message);
     try std.testing.expectEqual(@as(usize, 10), diagnostic.offset);
+}
+
+test "Parser.init preserves flow sequence implicit mapping limit diagnostics" {
+    const input = "[plain, key: [nested], tail]\n";
+    var diagnostic: Diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, yaml.Parser.init(std.testing.allocator, input, .{
+        .max_event_count = 13,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("event count exceeds configured limit", diagnostic.message);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, yaml.Parser.init(std.testing.allocator, input, .{
+        .max_scalar_bytes = 5,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("scalar exceeds configured size limit", diagnostic.message);
+
+    diagnostic = .{};
+    try std.testing.expectError(ParseError.Unsupported, yaml.Parser.init(std.testing.allocator, input, .{
+        .max_nesting_depth = 2,
+        .diagnostic = &diagnostic,
+    }));
+    try std.testing.expectEqualStrings("nesting depth exceeds configured limit", diagnostic.message);
 }
 
 test "load keeps hash characters inside double quoted block mapping scalars" {

@@ -74,6 +74,9 @@ fn checkParseEventsAllocationFailure(failing_allocator: std.mem.Allocator) !void
         \\  ? !e!key "quoted\nkey"
         \\  : [*root, {plain: value}]
         \\
+        ,
+        \\&root [plain, key: &node !<tag:example.com,2000:seq> [*node, {inner: value}], ? explicit : , : empty]
+        \\
     };
 
     for (inputs) |input| {

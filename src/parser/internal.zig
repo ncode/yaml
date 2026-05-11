@@ -54,9 +54,24 @@ pub const EventBuilder = struct {
     list: std.ArrayList(Event) = .empty,
     stats: EventStats = .{},
 
+    pub const Checkpoint = struct {
+        len: usize,
+        stats: EventStats,
+    };
+
     pub fn deinit(self: *EventBuilder, allocator: std.mem.Allocator) void {
         self.list.deinit(allocator);
         self.* = .{};
+    }
+
+    pub fn checkpoint(self: *const EventBuilder) Checkpoint {
+        return .{ .len = self.list.items.len, .stats = self.stats };
+    }
+
+    pub fn rollback(self: *EventBuilder, saved: Checkpoint) void {
+        std.debug.assert(saved.len <= self.list.items.len);
+        self.list.items.len = saved.len;
+        self.stats = saved.stats;
     }
 
     pub fn ensureTotalCapacity(self: *EventBuilder, allocator: std.mem.Allocator, capacity: usize) std.mem.Allocator.Error!void {
@@ -73,12 +88,22 @@ pub const EventBuilder = struct {
         self.stats.observeSlice(events);
     }
 
+    pub fn insert(self: *EventBuilder, allocator: std.mem.Allocator, index: usize, event: Event) std.mem.Allocator.Error!void {
+        try self.list.insert(allocator, index, event);
+        self.recomputeStats();
+    }
+
     pub fn toOwnedSlice(self: *EventBuilder, allocator: std.mem.Allocator) std.mem.Allocator.Error![]const Event {
         return self.list.toOwnedSlice(allocator);
     }
 
     pub fn slice(self: *const EventBuilder) []const Event {
         return self.list.items;
+    }
+
+    fn recomputeStats(self: *EventBuilder) void {
+        self.stats = .{};
+        self.stats.observeSlice(self.list.items);
     }
 };
 
@@ -99,6 +124,26 @@ test "event builder tracks event stats while appending" {
     try std.testing.expectEqual(@as(usize, 2), builder.stats.max_nesting_depth);
     try std.testing.expectEqual(@as(usize, 0), builder.stats.current_nesting_depth);
     try std.testing.expect(!builder.stats.malformed_nesting);
+}
+
+test "event builder rollback restores events and stats" {
+    var builder: EventBuilder = .{};
+    defer builder.deinit(std.testing.allocator);
+
+    try builder.append(std.testing.allocator, .stream_start);
+    try builder.append(std.testing.allocator, .{ .sequence_start = .{ .style = .flow } });
+    try builder.append(std.testing.allocator, .{ .scalar = .{ .value = "kept" } });
+    const checkpoint = builder.checkpoint();
+
+    try builder.append(std.testing.allocator, .{ .mapping_start = .{ .style = .flow } });
+    try builder.append(std.testing.allocator, .{ .scalar = .{ .value = "discarded" } });
+    try builder.append(std.testing.allocator, .mapping_end);
+    builder.rollback(checkpoint);
+
+    try std.testing.expectEqual(@as(usize, 3), builder.slice().len);
+    try std.testing.expectEqual(@as(usize, 3), builder.stats.event_count);
+    try std.testing.expectEqual(@as(usize, 4), builder.stats.max_scalar_bytes);
+    try std.testing.expectEqual(@as(usize, 1), builder.stats.current_nesting_depth);
 }
 
 pub const Line = struct {
