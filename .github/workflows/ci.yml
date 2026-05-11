@@ -23,7 +23,8 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             kcov valgrind \
-            git ca-certificates curl xz-utils
+            git ca-certificates curl xz-utils \
+            gnupg
 
       - name: Checkout
         uses: actions/checkout@v4
