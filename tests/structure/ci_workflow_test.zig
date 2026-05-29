@@ -22,7 +22,7 @@ test "structure: CI workflow runs required AGENTS checks" {
         "zig build test-allocation",
         "zig build test-leaks",
         "zig build test-coverage -Duse-llvm=true",
-        "zig build test-valgrind -Duse-llvm=true",
+        "zig build test-valgrind -Duse-llvm=true -Dcpu=baseline",
         "zig build docs",
         "zig build conformance-report",
     };
