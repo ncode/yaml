@@ -5,14 +5,13 @@
 //! Tested by: tests/unit/api/root_api_test.zig, tests/stress/stress.zig, and conformance tests.
 
 const std = @import("std");
+const construction_policy = @import("construction_policy.zig");
 const diagnostic = @import("../common/diagnostic.zig");
-const duplicate_key = @import("duplicate_key.zig");
 const failure = @import("failure.zig");
 const graph = @import("../compose/graph.zig");
 const node_pool = @import("../common/node_pool.zig");
 const options = @import("options.zig");
 const schema = @import("../schema/schema.zig");
-const tag = @import("../schema/tag.zig");
 const value_model = @import("../value/value.zig");
 
 const DuplicateKeyBehavior = options.DuplicateKeyBehavior;
@@ -22,6 +21,7 @@ const Node = value_model.Node;
 const NodePool = node_pool.Pool(Node);
 const Schema = schema.Schema;
 const UnknownTagBehavior = options.UnknownTagBehavior;
+const ConstructionPolicy = construction_policy.Policy;
 
 pub const LoadFailure = failure.LoadFailure;
 
@@ -123,19 +123,7 @@ const Constructor = struct {
     fn constructNodeInto(self: *Constructor, node: *Node, graph_node: *const graph.Node, comptime track_identity: bool) Error!void {
         switch (graph_node.*) {
             .scalar => |scalar| {
-                try self.validateTag(scalar.tag, .scalar);
-                tag.validateStandardBinaryContent(scalar.tag, scalar.value) catch |err| {
-                    self.recordFailure(.invalid_standard_tag);
-                    return err;
-                };
-                tag.validateStandardTimestampContent(scalar.tag, scalar.value) catch |err| {
-                    self.recordFailure(.invalid_standard_tag);
-                    return err;
-                };
-                node.* = (resolveSchemaScalar(self.allocator, self.schema, scalar) catch |err| {
-                    self.recordFailure(.invalid_scalar_tag);
-                    return err;
-                }) orelse
+                node.* = (try resolveSchemaScalar(self.allocator, self.constructionPolicy(), scalar)) orelse
                     .{ .scalar = .{
                         .value = try self.allocator.dupe(u8, scalar.value),
                         .style = scalar.style,
@@ -144,8 +132,8 @@ const Constructor = struct {
                     } };
             },
             .sequence => |sequence| {
-                try self.validateTag(sequence.tag, .sequence);
-                try self.validateStandardSequenceContent(sequence);
+                try self.constructionPolicy().validateTag(sequence.tag, .sequence);
+                try self.constructionPolicy().validateGraphSequence(sequence);
 
                 var items: std.ArrayList(*const Node) = .empty;
                 errdefer items.deinit(self.allocator);
@@ -165,16 +153,11 @@ const Constructor = struct {
                     .anchor = try copyOptionalSlice(self.allocator, sequence.anchor),
                     .tag = try copyOptionalSlice(self.allocator, sequence.tag),
                 } };
-                if (tag.isStandardOmapTag(sequence.tag)) {
-                    duplicate_key.validateUniqueOrderedMapKeys(owned_items) catch |err| {
-                        self.recordFailure(.invalid_standard_tag);
-                        return err;
-                    };
-                }
+                try self.constructionPolicy().validateConstructedSequence(owned_items, sequence.tag);
             },
             .mapping => |mapping| {
-                try self.validateTag(mapping.tag, .mapping);
-                try self.validateStandardMappingContent(mapping);
+                try self.constructionPolicy().validateTag(mapping.tag, .mapping);
+                try self.constructionPolicy().validateGraphMapping(mapping);
 
                 var pairs: std.ArrayList(MappingPair) = .empty;
                 errdefer pairs.deinit(self.allocator);
@@ -200,66 +183,28 @@ const Constructor = struct {
                     .anchor = try copyOptionalSlice(self.allocator, mapping.anchor),
                     .tag = try copyOptionalSlice(self.allocator, mapping.tag),
                 } };
-                if (tag.isStandardSetTag(mapping.tag)) {
-                    duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
-                        self.recordFailure(.invalid_standard_tag);
-                        return err;
-                    };
-                } else if (self.duplicate_key_behavior == .reject) {
-                    duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
-                        self.recordFailure(.duplicate_key);
-                        return err;
-                    };
-                }
+                try self.constructionPolicy().validateConstructedMapping(
+                    self.temporary_allocator,
+                    owned_pairs,
+                    mapping.tag,
+                    self.duplicate_key_behavior,
+                );
             },
         }
-    }
-
-    fn validateTag(self: *Constructor, node_tag: ?[]const u8, kind: tag.NodeKind) Error!void {
-        tag.validateStandardTagKind(node_tag, kind) catch |err| {
-            self.recordFailure(.invalid_standard_tag);
-            return err;
-        };
-
-        if (self.unknown_tag_behavior == .reject and tag.isUnknownTag(node_tag)) {
-            self.recordFailure(.unknown_tag);
-            return error.InvalidSyntax;
-        }
-    }
-
-    fn validateStandardSequenceContent(self: *Constructor, sequence: graph.SequenceNode) Error!void {
-        if (!tag.isStandardOmapTag(sequence.tag) and !tag.isStandardPairsTag(sequence.tag)) return;
-
-        for (sequence.items) |item| {
-            if (item.* != .mapping or item.mapping.pairs.len != 1) {
-                self.recordFailure(.invalid_standard_tag);
-                return error.InvalidSyntax;
-            }
-        }
-    }
-
-    fn validateStandardMappingContent(self: *Constructor, mapping: graph.MappingNode) Error!void {
-        if (!tag.isStandardSetTag(mapping.tag)) return;
-
-        for (mapping.pairs) |pair| {
-            if (!isSetNullValue(pair.value)) {
-                self.recordFailure(.invalid_standard_tag);
-                return error.InvalidSyntax;
-            }
-        }
-    }
-
-    fn isSetNullValue(node: *const graph.Node) bool {
-        return switch (node.*) {
-            .scalar => |scalar| schema.isCoreNullScalar(scalar.value, scalar.style == .plain, scalar.tag),
-            else => false,
-        };
     }
 
     fn recordFailure(self: *Constructor, load_failure: LoadFailure) void {
         if (self.failure) |target| {
             if (target.* == .unknown) target.* = load_failure;
         }
+    }
+
+    fn constructionPolicy(self: *Constructor) ConstructionPolicy {
+        return .{
+            .schema = self.schema,
+            .unknown_tag_behavior = self.unknown_tag_behavior,
+            .failure = self.failure,
+        };
     }
 };
 
@@ -298,37 +243,19 @@ fn countMappingGraphNodes(pairs: []const graph.MappingPair) usize {
 
 fn resolveSchemaScalar(
     allocator: std.mem.Allocator,
-    selected_schema: Schema,
+    policy: ConstructionPolicy,
     scalar_value: graph.ScalarNode,
 ) Error!?Node {
-    const resolved = (try schema.resolveScalar(
-        selected_schema,
-        scalar_value.value,
-        scalar_value.style == .plain,
-        scalar_value.tag,
-    )) orelse return null;
-
-    return switch (resolved) {
-        .null_value => .{ .null_value = .{
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-        .bool_value => |bool_value| .{ .bool_value = .{
-            .value = bool_value,
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-        .int_value => |int_value| .{ .int_value = .{
-            .value = int_value,
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-        .float_value => |float_value| .{ .float_value = .{
-            .value = float_value,
-            .anchor = try copyOptionalSlice(allocator, scalar_value.anchor),
-            .tag = try copyOptionalSlice(allocator, scalar_value.tag),
-        } },
-    };
+    const resolved = (try policy.validateAndResolveScalar(.{
+        .value = scalar_value.value,
+        .is_plain = scalar_value.style == .plain,
+        .tag = scalar_value.tag,
+    })) orelse return null;
+    return construction_policy.nodeFromResolvedScalar(
+        resolved,
+        try copyOptionalSlice(allocator, scalar_value.anchor),
+        try copyOptionalSlice(allocator, scalar_value.tag),
+    );
 }
 
 fn copyOptionalSlice(allocator: std.mem.Allocator, maybe_value: ?[]const u8) std.mem.Allocator.Error!?[]const u8 {

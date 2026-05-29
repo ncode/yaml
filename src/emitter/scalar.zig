@@ -1,13 +1,12 @@
 //! Purpose: Emit YAML scalar nodes and scalar-related properties.
-//! Owns: Scalar style selection, plain/quoted scalar output, Unicode scans, and scalar/collection properties.
-//! Does not own: Collection traversal, block scalar layout, tag URI encoding, or schema resolution.
-//! Depends on: common/diagnostic.zig, common/style.zig, block.zig, parser/event.zig, tag.zig.
+//! Owns: Scalar style selection, scalar/block-scalar output, Unicode scans, and scalar/collection properties.
+//! Does not own: Collection traversal, tag URI encoding, or schema resolution.
+//! Depends on: common/diagnostic.zig, common/style.zig, parser/event.zig, tag.zig.
 //! Tested by: tests/unit/api/root_api_test.zig, tests/conformance/yaml_suite_runner.zig, tests/stress/stress.zig.
 
 const std = @import("std");
 const common = @import("../common/diagnostic.zig");
 const event_types = @import("../parser/event.zig");
-const block_emit = @import("block.zig");
 const tag_emit = @import("tag.zig");
 const style_types = @import("../common/style.zig");
 
@@ -19,19 +18,19 @@ const Scalar = event_types.Scalar;
 const ScalarStyle = style_types.ScalarStyle;
 
 pub const appendEmittedTag = tag_emit.appendEmittedTag;
-pub const appendIndent = block_emit.appendIndent;
-pub const blockScalarEndsWithWhitespaceOnlyContentLine = block_emit.blockScalarEndsWithWhitespaceOnlyContentLine;
-pub const blockScalarHasLeadingTabIndentedLine = block_emit.blockScalarHasLeadingTabIndentedLine;
-pub const blockScalarHasTabStartedLine = block_emit.blockScalarHasTabStartedLine;
-pub const blockScalarHasTrailingSpaceOnlyContentLine = block_emit.blockScalarHasTrailingSpaceOnlyContentLine;
-pub const blockScalarUsesKeepChomping = block_emit.blockScalarUsesKeepChomping;
-pub const EmittedBlockScalarIndent = block_emit.Indent;
-pub const scalarUsesQuotedBlockFallback = block_emit.scalarUsesQuotedBlockFallback;
 pub const validateAnchorName = tag_emit.validateAnchorName;
 
-const appendFoldedBlockScalar = block_emit.appendFolded;
-const appendLiteralBlockScalar = block_emit.appendLiteral;
-const scalarShouldUseQuotedBlockFallback = block_emit.scalarShouldUseQuotedBlockFallback;
+pub const EmittedBlockScalarIndent = struct {
+    content: usize,
+    indicator: usize,
+    plain_continuation: usize = 0,
+    quote_block_scalar_whitespace_only_lines: bool = false,
+    quote_block_scalar_trailing_space_only_line: bool = false,
+    quote_block_scalar_tab_indented_lines: bool = false,
+    quote_literal_tab_started_lines: bool = false,
+    quote_plain_multiline: bool = true,
+    indent_indicator_for_newline_only: bool = false,
+};
 
 pub fn appendEmittedScalarNode(allocator: std.mem.Allocator, out: *std.ArrayList(u8), scalar: Scalar) Error!void {
     try appendEmittedScalarNodeIndented(allocator, out, scalar, .{
@@ -134,11 +133,11 @@ fn appendEmittedScalarIndented(
         .literal => if (scalarShouldUseQuotedBlockFallback(scalar, block_indent))
             try appendDoubleQuotedScalar(allocator, out, scalar.value)
         else
-            try appendLiteralBlockScalar(allocator, out, scalar.value, block_indent),
+            try appendLiteral(allocator, out, scalar.value, block_indent),
         .folded => if (scalarShouldUseQuotedBlockFallback(scalar, block_indent))
             try appendDoubleQuotedScalar(allocator, out, scalar.value)
         else
-            try appendFoldedBlockScalar(allocator, out, scalar.value, block_indent),
+            try appendFolded(allocator, out, scalar.value, block_indent),
     }
 }
 
@@ -224,6 +223,224 @@ pub fn appendPlainScalarWithLineBreaks(
         first = false;
         try out.appendSlice(allocator, line);
     }
+}
+
+pub fn appendIndent(allocator: std.mem.Allocator, out: *std.ArrayList(u8), indent: usize) std.mem.Allocator.Error!void {
+    var count = indent;
+    while (count > 0) : (count -= 1) {
+        try out.append(allocator, ' ');
+    }
+}
+
+pub fn scalarUsesQuotedBlockFallback(scalar: Scalar) bool {
+    return switch (scalar.style) {
+        .literal, .folded => blockScalarEndsWithWhitespaceOnlyContentLine(scalar.value),
+        .plain, .single_quoted, .double_quoted => false,
+    };
+}
+
+fn scalarShouldUseQuotedBlockFallback(scalar: Scalar, options: EmittedBlockScalarIndent) bool {
+    if (scalar.value.len == 0) return true;
+    if (options.quote_block_scalar_whitespace_only_lines and scalarUsesQuotedBlockFallback(scalar)) return true;
+    if (options.quote_block_scalar_trailing_space_only_line and
+        blockScalarHasTrailingSpaceOnlyContentLine(scalar.value)) return true;
+    if (options.quote_block_scalar_tab_indented_lines and
+        (blockScalarHasLeadingTabIndentedLine(scalar.value) or
+            (scalar.style == .folded and blockScalarHasTabStartedLine(scalar.value)))) return true;
+    if (options.quote_literal_tab_started_lines and scalar.style == .literal and
+        blockScalarHasTabStartedLine(scalar.value)) return true;
+    return false;
+}
+
+pub fn blockScalarEndsWithWhitespaceOnlyContentLine(value: []const u8) bool {
+    var line_start: usize = 0;
+    while (line_start < value.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, value, line_start, '\n') orelse value.len;
+        const line = value[line_start..line_end];
+        if (line.len != 0 and std.mem.trim(u8, line, " \t").len == 0 and
+            std.mem.indexOfScalar(u8, line, ' ') != null) return true;
+
+        if (line_end == value.len) break;
+        line_start = line_end + 1;
+    }
+
+    return false;
+}
+
+pub fn blockScalarHasTrailingSpaceOnlyContentLine(value: []const u8) bool {
+    if (value.len == 0) return false;
+
+    const content_end = if (value[value.len - 1] == '\n') value.len - 1 else value.len;
+    if (content_end == 0) return false;
+
+    const line_start = if (std.mem.lastIndexOfScalar(u8, value[0..content_end], '\n')) |newline|
+        newline + 1
+    else
+        0;
+    const line = value[line_start..content_end];
+    return line.len != 0 and std.mem.trim(u8, line, " \t").len == 0 and
+        std.mem.indexOfScalar(u8, line, ' ') != null;
+}
+
+pub fn blockScalarHasLeadingTabIndentedLine(value: []const u8) bool {
+    var line_start: usize = 0;
+    while (line_start < value.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, value, line_start, '\n') orelse value.len;
+        const line = value[line_start..line_end];
+
+        var saw_space = false;
+        for (line) |byte| {
+            switch (byte) {
+                '\t' => return saw_space,
+                ' ' => saw_space = true,
+                else => break,
+            }
+        }
+
+        if (line_end == value.len) break;
+        line_start = line_end + 1;
+    }
+
+    return false;
+}
+
+pub fn blockScalarUsesKeepChomping(value: []const u8) bool {
+    if (value.len == 0 or value[value.len - 1] != '\n') return false;
+    return value.len == 1 or value[value.len - 2] == '\n';
+}
+
+pub fn blockScalarHasTabStartedLine(value: []const u8) bool {
+    var line_start: usize = 0;
+    while (line_start < value.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, value, line_start, '\n') orelse value.len;
+        const line = value[line_start..line_end];
+        if (line.len != 0 and line[0] == '\t') return true;
+
+        if (line_end == value.len) break;
+        line_start = line_end + 1;
+    }
+
+    return false;
+}
+
+pub fn appendLiteral(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    value: []const u8,
+    indent: EmittedBlockScalarIndent,
+) Error!void {
+    try appendBlockScalar(allocator, out, '|', value, indent);
+}
+
+pub fn appendFolded(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    value: []const u8,
+    indent: EmittedBlockScalarIndent,
+) Error!void {
+    try out.append(allocator, '>');
+    if (value.len == 0) return;
+    if (blockScalarNeedsIndentIndicatorWithOptions(value, indent)) {
+        if (indent.indicator == 0 or indent.indicator > 9) return ParseError.Unsupported;
+        const digit: u8 = @intCast(indent.indicator);
+        try out.append(allocator, '0' + digit);
+    }
+    if (value[value.len - 1] != '\n') {
+        try out.append(allocator, '-');
+    } else if (blockScalarUsesKeepChomping(value)) {
+        try out.append(allocator, '+');
+    }
+
+    try out.append(allocator, '\n');
+
+    var line_start: usize = 0;
+    while (line_start < value.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, value, line_start, '\n') orelse value.len;
+        const line = value[line_start..line_end];
+
+        if (line.len != 0) {
+            try appendIndent(allocator, out, indent.content);
+            try out.appendSlice(allocator, line);
+        }
+
+        if (line_end == value.len) break;
+
+        var newline_end = line_end;
+        while (newline_end < value.len and value[newline_end] == '\n') : (newline_end += 1) {}
+
+        const newline_count = newline_end - line_end;
+        const output_newline_count = if (newline_end == value.len) newline_count - 1 else blk: {
+            const next_line_end = std.mem.indexOfScalarPos(u8, value, newline_end, '\n') orelse value.len;
+            const next_line = value[newline_end..next_line_end];
+            break :blk if (line.len == 0 or lineStartsWhitespace(line) or lineStartsWhitespace(next_line)) newline_count else newline_count + 1;
+        };
+        for (0..output_newline_count) |_| try out.append(allocator, '\n');
+
+        line_start = newline_end;
+    }
+}
+
+fn appendBlockScalar(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    indicator: u8,
+    value: []const u8,
+    indent: EmittedBlockScalarIndent,
+) Error!void {
+    try out.append(allocator, indicator);
+    if (value.len == 0) return;
+    if (blockScalarNeedsIndentIndicatorWithOptions(value, indent)) {
+        if (indent.indicator == 0 or indent.indicator > 9) return ParseError.Unsupported;
+        const digit: u8 = @intCast(indent.indicator);
+        try out.append(allocator, '0' + digit);
+    }
+    if (value[value.len - 1] != '\n') {
+        try out.append(allocator, '-');
+    } else if (blockScalarUsesKeepChomping(value)) {
+        try out.append(allocator, '+');
+    }
+
+    try out.append(allocator, '\n');
+
+    var line_start: usize = 0;
+    while (line_start < value.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, value, line_start, '\n') orelse value.len;
+        const line = value[line_start..line_end];
+
+        if (line.len != 0) {
+            try appendIndent(allocator, out, indent.content);
+            try out.appendSlice(allocator, line);
+        }
+
+        if (line_end == value.len) break;
+        line_start = line_end + 1;
+        if (line_start < value.len) try out.append(allocator, '\n');
+    }
+}
+
+fn blockScalarNeedsIndentIndicator(value: []const u8) bool {
+    var line_start: usize = 0;
+    var saw_leading_empty_line = false;
+    while (line_start < value.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, value, line_start, '\n') orelse value.len;
+        const line = value[line_start..line_end];
+        if (line.len != 0) {
+            return line[0] == ' ' or (saw_leading_empty_line and line[0] == '#');
+        }
+        saw_leading_empty_line = true;
+        if (line_end == value.len) return false;
+        line_start = line_end + 1;
+    }
+    return false;
+}
+
+fn blockScalarNeedsIndentIndicatorWithOptions(value: []const u8, indent: EmittedBlockScalarIndent) bool {
+    return blockScalarNeedsIndentIndicator(value) or
+        (indent.indent_indicator_for_newline_only and isAllNewlines(value));
+}
+
+fn lineStartsWhitespace(line: []const u8) bool {
+    return line.len != 0 and (line[0] == ' ' or line[0] == '\t');
 }
 
 fn plainScalarLineNeedsQuoting(value: []const u8) bool {
@@ -615,6 +832,89 @@ test "emitter: alias emission validates anchor names" {
     out.clearRetainingCapacity();
     try std.testing.expectError(common.ParseError.InvalidSyntax, appendEmittedAlias(std.testing.allocator, &out, "bad,name"));
     try std.testing.expectEqualStrings("", out.items);
+}
+
+test appendIndent {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendIndent(std.testing.allocator, &out, 0);
+    try std.testing.expectEqualStrings("", out.items);
+
+    try appendIndent(std.testing.allocator, &out, 3);
+    try std.testing.expectEqualStrings("   ", out.items);
+}
+
+test "emitter: block scalar fallback predicates cover whitespace-only lines" {
+    try std.testing.expect(!blockScalarEndsWithWhitespaceOnlyContentLine("plain\ntext"));
+    try std.testing.expect(blockScalarEndsWithWhitespaceOnlyContentLine("plain\n  \n"));
+    try std.testing.expect(!blockScalarHasTrailingSpaceOnlyContentLine("plain\n\t"));
+    try std.testing.expect(blockScalarHasTrailingSpaceOnlyContentLine("plain\n  "));
+
+    try std.testing.expect(scalarShouldUseQuotedBlockFallback(.{
+        .value = "",
+        .style = .literal,
+    }, .{ .content = 2, .indicator = 2 }));
+    try std.testing.expect(scalarShouldUseQuotedBlockFallback(.{
+        .value = "plain\n  \n",
+        .style = .literal,
+    }, .{ .content = 2, .indicator = 2, .quote_block_scalar_whitespace_only_lines = true }));
+    try std.testing.expect(scalarShouldUseQuotedBlockFallback(.{
+        .value = "plain\n  ",
+        .style = .folded,
+    }, .{ .content = 2, .indicator = 2, .quote_block_scalar_trailing_space_only_line = true }));
+}
+
+test "emitter: block scalar fallback predicates cover tab-indented lines" {
+    try std.testing.expect(!blockScalarHasLeadingTabIndentedLine("\tstarted"));
+    try std.testing.expect(blockScalarHasLeadingTabIndentedLine(" \tindented"));
+    try std.testing.expect(blockScalarHasTabStartedLine("plain\n\tstarted"));
+
+    try std.testing.expect(scalarShouldUseQuotedBlockFallback(.{
+        .value = " \tindented",
+        .style = .literal,
+    }, .{ .content = 2, .indicator = 2, .quote_block_scalar_tab_indented_lines = true }));
+    try std.testing.expect(scalarShouldUseQuotedBlockFallback(.{
+        .value = "plain\n\tstarted",
+        .style = .folded,
+    }, .{ .content = 2, .indicator = 2, .quote_block_scalar_tab_indented_lines = true }));
+    try std.testing.expect(scalarShouldUseQuotedBlockFallback(.{
+        .value = "\tstarted",
+        .style = .literal,
+    }, .{ .content = 2, .indicator = 2, .quote_literal_tab_started_lines = true }));
+}
+
+test "emitter: block scalar chomping and indent indicator edge predicates" {
+    try std.testing.expect(!blockScalarUsesKeepChomping("plain"));
+    try std.testing.expect(blockScalarUsesKeepChomping("\n"));
+    try std.testing.expect(!blockScalarUsesKeepChomping("plain\n"));
+    try std.testing.expect(blockScalarUsesKeepChomping("plain\n\n"));
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+
+    try appendLiteral(std.testing.allocator, &out, "\n", .{
+        .content = 2,
+        .indent_indicator_for_newline_only = true,
+        .indicator = 2,
+    });
+    try std.testing.expectEqualStrings("|2+\n", out.items);
+
+    out.clearRetainingCapacity();
+    try appendFolded(std.testing.allocator, &out, " leading\n", .{
+        .content = 2,
+        .indicator = 2,
+    });
+    try std.testing.expectEqualStrings(">2\n   leading", out.items);
+}
+
+test "emitter: block scalar rejects unsupported indent indicator" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(std.testing.allocator);
+
+    try std.testing.expectError(ParseError.Unsupported, appendFolded(std.testing.allocator, &out, " leading", .{ .content = 2, .indicator = 0 }));
+    out.clearRetainingCapacity();
+    try std.testing.expectError(ParseError.Unsupported, appendLiteral(std.testing.allocator, &out, " leading", .{ .content = 2, .indicator = 10 }));
 }
 
 test "emitter: single quoted scalar doubles embedded quotes" {

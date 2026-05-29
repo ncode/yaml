@@ -80,8 +80,10 @@ jobs:
           files: zig-out/coverage/merged/cobertura.xml
           fail_ci_if_error: false
 
+      # Valgrind 3.24 cannot decode every AVX/EVEX instruction LLVM may emit for
+      # GitHub's native runner CPU. Keep Memcheck binaries on baseline x86_64.
       - name: Valgrind leak checks
-        run: zig build test-valgrind -Duse-llvm=true
+        run: zig build test-valgrind -Duse-llvm=true -Dcpu=baseline
 
       - name: API docs
         run: zig build docs

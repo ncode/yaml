@@ -10,43 +10,43 @@ const token = @import("token.zig");
 
 const Error = token.Error;
 
-pub fn readName(scanner: anytype, prefix_len: usize) Error![]const u8 {
-    const start = scanner.index + prefix_len;
+pub fn readName(input: []const u8, index: *usize, prefix_len: usize) Error![]const u8 {
+    const start = index.* + prefix_len;
     var cursor = start;
-    while (cursor < scanner.input.len) : (cursor += 1) {
-        if (std.mem.startsWith(u8, scanner.input[cursor..], lex.utf8_bom)) return error.InvalidSyntax;
-        const byte = scanner.input[cursor];
+    while (cursor < input.len) : (cursor += 1) {
+        if (std.mem.startsWith(u8, input[cursor..], lex.utf8_bom)) return error.InvalidSyntax;
+        const byte = input[cursor];
         if (lex.isFlowStartIndicator(byte)) return error.InvalidSyntax;
         if (byte == ' ' or byte == '\t' or lex.isLineBreakByte(byte) or lex.isFlowIndicator(byte)) break;
-        if (byte == '#' and lex.isCommentStart(scanner.input, cursor)) break;
+        if (byte == '#' and lex.isCommentStart(input, cursor)) break;
     }
 
     if (cursor == start) return error.InvalidSyntax;
-    scanner.index = cursor;
-    return scanner.input[start..cursor];
+    index.* = cursor;
+    return input[start..cursor];
 }
 
-pub fn readTag(scanner: anytype) Error![]const u8 {
-    if (std.mem.startsWith(u8, scanner.input[scanner.index..], "!<")) {
-        var cursor = scanner.index + 2;
-        while (cursor < scanner.input.len and scanner.input[cursor] != '>') : (cursor += 1) {
-            if (std.mem.startsWith(u8, scanner.input[cursor..], lex.utf8_bom)) return error.InvalidSyntax;
-            if (lex.isLineBreakByte(scanner.input[cursor])) return error.InvalidSyntax;
+pub fn readTag(input: []const u8, index: *usize) Error![]const u8 {
+    if (std.mem.startsWith(u8, input[index.*..], "!<")) {
+        var cursor = index.* + 2;
+        while (cursor < input.len and input[cursor] != '>') : (cursor += 1) {
+            if (std.mem.startsWith(u8, input[cursor..], lex.utf8_bom)) return error.InvalidSyntax;
+            if (lex.isLineBreakByte(input[cursor])) return error.InvalidSyntax;
         }
-        if (cursor >= scanner.input.len) return error.InvalidSyntax;
-        const tag = scanner.input[scanner.index .. cursor + 1];
-        scanner.index = cursor + 1;
+        if (cursor >= input.len) return error.InvalidSyntax;
+        const tag = input[index.* .. cursor + 1];
+        index.* = cursor + 1;
         return tag;
     }
 
-    const start = scanner.index;
-    if (lex.isSeparatedIndicatorAt(scanner.input, start, 1) or
-        (start + 1 < scanner.input.len and lex.isFlowIndicator(scanner.input[start + 1])))
+    const start = index.*;
+    if (lex.isSeparatedIndicatorAt(input, start, 1) or
+        (start + 1 < input.len and lex.isFlowIndicator(input[start + 1])))
     {
-        scanner.index += 1;
-        return scanner.input[start..scanner.index];
+        index.* += 1;
+        return input[start..index.*];
     }
 
-    _ = try readName(scanner, 1);
-    return scanner.input[start..scanner.index];
+    _ = try readName(input, index, 1);
+    return input[start..index.*];
 }

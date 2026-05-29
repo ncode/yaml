@@ -22,7 +22,7 @@ test "structure: structure checks stay split into focused test files" {
         .{ .path = "tests/structure/file_size_test.zig", .max_lines = 80 },
         .{ .path = "tests/structure/source_size_test.zig", .max_lines = 250 },
         .{ .path = "tests/structure/unit_size_test.zig", .max_lines = 180 },
-        .{ .path = "tests/structure/api_boundary_test.zig", .max_lines = 190 },
+        .{ .path = "tests/structure/api_boundary_test.zig", .max_lines = 240 },
         .{ .path = "tests/structure/docs_tooling_test.zig", .max_lines = 140 },
         .{ .path = "tests/structure/module_comment_test.zig", .max_lines = 100 },
         .{ .path = "tests/structure/support.zig", .max_lines = 120 },
@@ -51,6 +51,14 @@ test "structure: common modules stay focused" {
     try support.expectLineLimits(&files);
 }
 
+test "structure: API diagnostic policy stays focused" {
+    const files = [_]SourceFile{
+        .{ .path = "src/api/diagnostic_policy.zig", .max_lines = 180 },
+    };
+
+    try support.expectLineLimits(&files);
+}
+
 test "structure: scalar emitter stays consolidated and bounded" {
     const files = [_]SourceFile{
         .{ .path = "src/emitter/scalar.zig", .max_lines = 1200 },
@@ -59,16 +67,20 @@ test "structure: scalar emitter stays consolidated and bounded" {
     try support.expectLineLimits(&files);
 }
 
-test "structure: value model payloads stay split by concern" {
+test "structure: value graph payloads stay cohesive" {
     const files = [_]SourceFile{
-        .{ .path = "src/value/scalar.zig", .max_lines = 180 },
-        .{ .path = "src/value/sequence.zig", .max_lines = 140 },
-        .{ .path = "src/value/mapping.zig", .max_lines = 160 },
-        .{ .path = "src/value/value.zig", .max_lines = 180 },
-        .{ .path = "src/value/deinit.zig", .max_lines = 80 },
+        .{ .path = "src/value/value.zig", .max_lines = 500 },
     };
 
     try support.expectLineLimits(&files);
+    try support.expectRepoFilesAbsent(&.{
+        "src/value/scalar.zig",
+        "src/value/sequence.zig",
+        "src/value/mapping.zig",
+        "src/value/document.zig",
+        "src/value/stream.zig",
+        "src/value/deinit.zig",
+    });
 }
 
 test "structure: parser diagnostics stay consolidated" {

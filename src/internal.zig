@@ -13,6 +13,7 @@ pub const parser = @import("parser/api.zig");
 pub const reader = @import("reader/reader.zig");
 pub const schema = @import("schema/schema.zig");
 pub const scanner = @import("scanner/scanner.zig");
+pub const value = @import("value/value.zig");
 pub const diagnostics = @import("parser/diagnostics.zig");
 pub const source_diagnostic = diagnostics;
 pub const source_diagnostic_chars = diagnostics;

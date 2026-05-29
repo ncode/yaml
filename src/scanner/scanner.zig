@@ -98,7 +98,7 @@ const Scanner = struct {
                     if (isCommentStart(self.input, self.index)) {
                         try appendComment(self);
                     } else {
-                        try scalar.appendScalar(self);
+                        try appendScalar(self);
                     }
                 },
                 '[' => try appendFlowSequenceStart(self),
@@ -107,12 +107,12 @@ const Scanner = struct {
                 '}' => try appendFlowMappingEnd(self),
                 ',' => {
                     if (!(try appendFlowEntry(self))) {
-                        try scalar.appendScalar(self);
+                        try appendScalar(self);
                     }
                 },
                 ':' => {
                     if (!(try appendMappingValue(self))) {
-                        try scalar.appendScalar(self);
+                        try appendScalar(self);
                     }
                 },
                 '&' => try appendAnchor(self),
@@ -120,18 +120,19 @@ const Scanner = struct {
                 '!' => try appendTag(self),
                 '\'', '"' => {
                     if (self.quoteStartsPlainScalarContinuation(byte)) {
-                        try scalar.appendScalar(self);
+                        try appendScalar(self);
                     } else {
-                        const value = try scalar.readQuotedScalar(self, byte);
+                        const value = try scalar.readQuotedScalar(self.input, &self.index, byte);
                         try self.tokens.append(self.allocator, .{ .scalar = value });
                     }
                 },
                 '|', '>' => {
-                    if (!block_scalar.indicatorStartsNode(self)) {
-                        try scalar.appendScalar(self);
+                    if (!block_scalar.indicatorStartsNode(self.tokens.items, self.index, self.line_content_start, flowDepth(self))) {
+                        try appendScalar(self);
                         continue;
                     }
-                    const value = try block_scalar.readBlockScalar(self, byte);
+                    const value = try block_scalar.readBlockScalar(self.input, &self.index, self.line_content_start, self.tokens.items, flowDepth(self), byte);
+                    self.line_start = true;
                     try self.tokens.append(self.allocator, .{ .block_scalar = value });
                 },
                 '-' => {
@@ -141,7 +142,7 @@ const Scanner = struct {
                     } else if (try consumeCompactBlockSequenceEntry(self)) {
                         try self.tokens.append(self.allocator, .block_sequence_entry);
                     } else {
-                        try scalar.appendScalar(self);
+                        try appendScalar(self);
                     }
                 },
                 '?' => {
@@ -150,10 +151,10 @@ const Scanner = struct {
                         try self.tokens.append(self.allocator, if (flowDepth(self) == 0) .block_mapping_key else .flow_mapping_key);
                         self.index += 1;
                     } else {
-                        try scalar.appendScalar(self);
+                        try appendScalar(self);
                     }
                 },
-                else => try scalar.appendScalar(self),
+                else => try appendScalar(self),
             }
         }
 
@@ -173,7 +174,7 @@ const Scanner = struct {
                 .comment, .indent => continue,
                 .anchor, .alias, .tag => continue,
                 .scalar => |value| {
-                    if (std.mem.eql(u8, value, "?") and block_scalar.compactSequenceExplicitKeyParentIndent(self, 0) != null) {
+                    if (std.mem.eql(u8, value, "?") and block_scalar.compactSequenceExplicitKeyParentIndent(self.tokens.items, 0) != null) {
                         return false;
                     }
                     return true;
@@ -301,6 +302,11 @@ fn appendDocumentStartContent(scanner: anytype, marker_end: usize) Error!void {
     } });
 }
 
+fn appendScalar(scanner: anytype) Error!void {
+    const value = try scalar.readPlainScalar(scanner.input, &scanner.index, flowDepth(scanner));
+    try scanner.tokens.append(scanner.allocator, .{ .scalar = value });
+}
+
 fn tabWouldIndentSeparatedFlowNode(scanner: anytype, cursor: usize) bool {
     if (!lex.isFlowStartIndicator(scanner.input[cursor])) return false;
 
@@ -357,17 +363,17 @@ fn appendMappingValue(scanner: anytype) Error!bool {
 }
 
 fn appendAnchor(scanner: anytype) Error!void {
-    const value = try property.readName(scanner, 1);
+    const value = try property.readName(scanner.input, &scanner.index, 1);
     try scanner.tokens.append(scanner.allocator, .{ .anchor = value });
 }
 
 fn appendAlias(scanner: anytype) Error!void {
-    const value = try property.readName(scanner, 1);
+    const value = try property.readName(scanner.input, &scanner.index, 1);
     try scanner.tokens.append(scanner.allocator, .{ .alias = value });
 }
 
 fn appendTag(scanner: anytype) Error!void {
-    const value = try property.readTag(scanner);
+    const value = try property.readTag(scanner.input, &scanner.index);
     try scanner.tokens.append(scanner.allocator, .{ .tag = value });
 }
 

@@ -1,21 +1,19 @@
 //! Purpose: Public YAML loader API.
 //! Owns: Single-document and stream loading entry points plus load-time limits.
 //! Does not own: Event parsing, composition internals, schema resolution details, or value deinitialization types.
-//! Depends on: api/parse.zig, api/options.zig, api/diagnostics.zig, loader/loader.zig, value/value.zig, and common/diagnostic.zig.
+//! Depends on: api/parse.zig, api/options.zig, api/diagnostics.zig, api/diagnostic_policy.zig, loader/loader.zig, and value/value.zig.
 //! Tested by: tests/unit/api/root_api_test.zig, tests/conformance/yaml_suite_runner.zig, tests/stress/stress.zig.
 
 const std = @import("std");
-const common_diagnostic = @import("../common/diagnostic.zig");
 const common_limit = @import("../common/limit.zig");
 const node_pool = @import("../common/node_pool.zig");
+const diagnostic_policy = @import("diagnostic_policy.zig");
 const diagnostics = @import("diagnostics.zig");
-const duplicate_key = @import("../loader/duplicate_key.zig");
+const construction_policy = @import("../loader/construction_policy.zig");
 const options_api = @import("options.zig");
 const parse = @import("parse.zig");
 const loader = @import("../loader/loader.zig");
 const scanner = @import("../scanner/scanner.zig");
-const schema = @import("../schema/schema.zig");
-const schema_tag = @import("../schema/tag.zig");
 const simple_fast_path = @import("../parser/simple_fast_path.zig");
 const parser_tag = @import("../parser/tag.zig");
 const value = @import("../value/value.zig");
@@ -26,6 +24,7 @@ const LoadedStream = value.LoadedStream;
 const LoadOptions = options_api.LoadOptions;
 const NodePool = node_pool.Pool(value.Node);
 const ParseError = diagnostics.ParseError;
+const ConstructionPolicy = construction_policy.Policy;
 
 /// Loads a single YAML document into an arena-owned representation graph.
 /// Returned node data is owned by the returned `LoadedDocument`; call `deinit`
@@ -42,9 +41,7 @@ pub fn loadWithOptions(allocator: std.mem.Allocator, input: []const u8, options:
     const document_count = loaded_stream.documents.len;
     if (document_count != 1) {
         loaded_stream.deinit();
-        if (options.diagnostic) |diagnostic| {
-            diagnostic.* = common_diagnostic.atOffset(input, input.len, "loader expected exactly one document");
-        }
+        diagnostic_policy.setSingleDocumentCountFailure(options.diagnostic, input);
         return if (document_count == 0) ParseError.InvalidSyntax else ParseError.Unsupported;
     }
 
@@ -100,11 +97,7 @@ fn loadStreamViaEvents(allocator: std.mem.Allocator, input: []const u8, options:
         &load_failure,
         true,
     ) catch |err| {
-        if (options.diagnostic) |diagnostic| {
-            if (diagnostic.message.len == 0) {
-                diagnostic.* = loadDiagnostic(input, load_failure, err);
-            }
-        }
+        diagnostic_policy.setLoadFailure(options.diagnostic, input, load_failure, err);
         return err;
     };
 
@@ -121,7 +114,7 @@ fn loadStreamFastPath(allocator: std.mem.Allocator, input: []const u8, options: 
 fn tryStrictSimpleLoadStream(allocator: std.mem.Allocator, input: []const u8, options: LoadOptions) Error!?LoadedStream {
     if (options.max_input_bytes) |max_input_bytes| {
         if (input.len > max_input_bytes) {
-            setLimitDiagnostic(input, max_input_bytes, options, "input exceeds configured size limit");
+            diagnostic_policy.setLimit(options.diagnostic, input, .{ .input_size = max_input_bytes });
             return ParseError.Unsupported;
         }
     }
@@ -140,7 +133,7 @@ fn tryStrictSimpleLoadStream(allocator: std.mem.Allocator, input: []const u8, op
 
     if (options.max_token_count) |max_token_count| {
         if (token_stream.tokens.len > max_token_count) {
-            setLimitDiagnostic(input, input.len, options, "token count exceeds configured limit");
+            diagnostic_policy.setLimit(options.diagnostic, input, .token_count);
             return ParseError.Unsupported;
         }
     }
@@ -150,7 +143,7 @@ fn tryStrictSimpleLoadStream(allocator: std.mem.Allocator, input: []const u8, op
 
     if (options.max_document_count) |max_document_count| {
         if (max_document_count == 0) {
-            setLoadFailureDiagnostic(input, options, .document_count_limit, ParseError.Unsupported);
+            diagnostic_policy.setLoadFailure(options.diagnostic, input, .document_count_limit, ParseError.Unsupported);
             return ParseError.Unsupported;
         }
     }
@@ -171,7 +164,7 @@ fn tryStrictSimpleLoadStream(allocator: std.mem.Allocator, input: []const u8, op
     const documents = try arena_allocator.alloc(*const value.Node, 1);
     documents[0] = root;
 
-    if (options.diagnostic) |diagnostic| diagnostic.* = .{};
+    diagnostic_policy.clear(options.diagnostic);
     return .{
         .arena = arena,
         .documents = documents,
@@ -181,7 +174,7 @@ fn tryStrictSimpleLoadStream(allocator: std.mem.Allocator, input: []const u8, op
 fn trySourceLineLoadStream(allocator: std.mem.Allocator, input: []const u8, options: LoadOptions) Error!?LoadedStream {
     if (options.max_input_bytes) |max_input_bytes| {
         if (input.len > max_input_bytes) {
-            setLimitDiagnostic(input, max_input_bytes, options, "input exceeds configured size limit");
+            diagnostic_policy.setLimit(options.diagnostic, input, .{ .input_size = max_input_bytes });
             return ParseError.Unsupported;
         }
     }
@@ -195,7 +188,7 @@ fn trySourceLineLoadStreamAfterInputLimit(allocator: std.mem.Allocator, input: [
 
     if (options.max_document_count) |max_document_count| {
         if (max_document_count == 0) {
-            setLoadFailureDiagnostic(input, options, .document_count_limit, ParseError.Unsupported);
+            diagnostic_policy.setLoadFailure(options.diagnostic, input, .document_count_limit, ParseError.Unsupported);
             return ParseError.Unsupported;
         }
     }
@@ -221,7 +214,7 @@ fn trySourceLineLoadStreamAfterInputLimit(allocator: std.mem.Allocator, input: [
     const documents = try arena_allocator.alloc(*const value.Node, 1);
     documents[0] = root;
 
-    if (options.diagnostic) |diagnostic| diagnostic.* = .{};
+    diagnostic_policy.clear(options.diagnostic);
     return .{
         .arena = arena,
         .documents = documents,
@@ -422,7 +415,7 @@ fn hasOnlySourceLineBytes(input: []const u8) bool {
 fn checkSourceLineLimits(input: []const u8, options: LoadOptions, shape: SourceLineShape) Error!void {
     if (options.max_token_count) |max_token_count| {
         if (sourceLineTokenCount(shape) > max_token_count) {
-            setLimitDiagnostic(input, input.len, options, "token count exceeds configured limit");
+            diagnostic_policy.setLimit(options.diagnostic, input, .token_count);
             return ParseError.Unsupported;
         }
     }
@@ -737,21 +730,21 @@ fn checkStrictShapeLimits(input: []const u8, options: LoadOptions, shape: Strict
 fn checkStrictStatsLimits(input: []const u8, options: LoadOptions, stats: StrictShapeStats) Error!void {
     if (options.max_event_count) |max_event_count| {
         if (stats.event_count > max_event_count) {
-            setLimitDiagnostic(input, input.len, options, "event count exceeds configured limit");
+            diagnostic_policy.setLimit(options.diagnostic, input, .event_count);
             return ParseError.Unsupported;
         }
     }
 
     if (options.max_scalar_bytes) |max_scalar_bytes| {
         if (stats.max_scalar_bytes > max_scalar_bytes) {
-            setLimitDiagnostic(input, input.len, options, "scalar exceeds configured size limit");
+            diagnostic_policy.setLimit(options.diagnostic, input, .scalar_size);
             return ParseError.Unsupported;
         }
     }
 
     const max_nesting_depth = options.max_nesting_depth orelse common_limit.default_parse_collection_depth;
     if (stats.max_nesting_depth > max_nesting_depth) {
-        setLimitDiagnostic(input, input.len, options, "nesting depth exceeds configured limit");
+        diagnostic_policy.setLimit(options.diagnostic, input, .nesting_depth);
         return ParseError.Unsupported;
     }
 }
@@ -979,20 +972,18 @@ const StrictSimpleBuilder = struct {
 
     fn constructPlainScalarNode(self: *StrictSimpleBuilder, scalar_token: StrictScalarToken) Error!value.Node {
         const resolved_tag = try self.resolveTag(scalar_token.tag);
-        try self.validateScalarTag(resolved_tag, scalar_token.value);
-
-        const resolved = schema.resolveScalar(self.options.schema, scalar_token.value, true, resolved_tag) catch |err| {
-            setLoadFailureDiagnostic(self.input, self.options, .invalid_scalar_tag, err);
+        var load_failure: loader.LoadFailure = .unknown;
+        const resolved = self.constructionPolicy(&load_failure).validateAndResolveScalar(.{
+            .value = scalar_token.value,
+            .is_plain = true,
+            .tag = resolved_tag,
+        }) catch |err| {
+            diagnostic_policy.setLoadFailure(self.options.diagnostic, self.input, load_failure, err);
             return err;
         };
 
         if (resolved) |resolved_scalar| {
-            return switch (resolved_scalar) {
-                .null_value => .{ .null_value = .{ .tag = resolved_tag } },
-                .bool_value => |bool_value| .{ .bool_value = .{ .value = bool_value, .tag = resolved_tag } },
-                .int_value => |int_value| .{ .int_value = .{ .value = int_value, .tag = resolved_tag } },
-                .float_value => |float_value| .{ .float_value = .{ .value = float_value, .tag = resolved_tag } },
-            };
+            return construction_policy.nodeFromResolvedScalar(resolved_scalar, null, resolved_tag);
         }
 
         return .{ .scalar = .{
@@ -1004,72 +995,31 @@ const StrictSimpleBuilder = struct {
     fn resolveTag(self: *StrictSimpleBuilder, raw_tag: ?[]const u8) Error!?[]const u8 {
         const tag_value = raw_tag orelse return null;
         return parser_tag.resolve(self.arena_allocator, &.{}, tag_value) catch |err| {
-            setLoadFailureDiagnostic(self.input, self.options, .invalid_graph, err);
-            return err;
-        };
-    }
-
-    fn validateScalarTag(self: *StrictSimpleBuilder, resolved_tag: ?[]const u8, scalar_value: []const u8) Error!void {
-        schema_tag.validateStandardTagKind(resolved_tag, .scalar) catch |err| {
-            setLoadFailureDiagnostic(self.input, self.options, .invalid_standard_tag, err);
-            return err;
-        };
-        if (self.options.unknown_tag_behavior == .reject and schema_tag.isUnknownTag(resolved_tag)) {
-            setLoadFailureDiagnostic(self.input, self.options, .unknown_tag, ParseError.InvalidSyntax);
-            return ParseError.InvalidSyntax;
-        }
-        schema_tag.validateStandardBinaryContent(resolved_tag, scalar_value) catch |err| {
-            setLoadFailureDiagnostic(self.input, self.options, .invalid_standard_tag, err);
-            return err;
-        };
-        schema_tag.validateStandardTimestampContent(resolved_tag, scalar_value) catch |err| {
-            setLoadFailureDiagnostic(self.input, self.options, .invalid_standard_tag, err);
+            diagnostic_policy.setLoadFailure(self.options.diagnostic, self.input, .invalid_graph, err);
             return err;
         };
     }
 
     fn validateMappingPairs(self: *StrictSimpleBuilder, pairs: []const value.MappingPair) Error!void {
-        if (self.options.duplicate_key_behavior == .allow) return;
-        duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, pairs) catch |err| {
-            setLoadFailureDiagnostic(self.input, self.options, .duplicate_key, err);
+        var load_failure: loader.LoadFailure = .unknown;
+        self.constructionPolicy(&load_failure).validateDuplicateMappingKeys(
+            self.temporary_allocator,
+            pairs,
+            self.options.duplicate_key_behavior,
+        ) catch |err| {
+            diagnostic_policy.setLoadFailure(self.options.diagnostic, self.input, load_failure, err);
             return err;
         };
     }
+
+    fn constructionPolicy(self: *StrictSimpleBuilder, load_failure: *loader.LoadFailure) ConstructionPolicy {
+        return .{
+            .schema = self.options.schema,
+            .unknown_tag_behavior = self.options.unknown_tag_behavior,
+            .failure = load_failure,
+        };
+    }
 };
-
-fn setLimitDiagnostic(input: []const u8, offset: usize, options: LoadOptions, message: []const u8) void {
-    if (options.diagnostic) |diagnostic| {
-        diagnostic.* = common_diagnostic.atOffset(input, offset, message);
-    }
-}
-
-fn setLoadFailureDiagnostic(input: []const u8, options: LoadOptions, failure: loader.LoadFailure, err: Error) void {
-    if (options.diagnostic) |diagnostic| {
-        if (diagnostic.message.len == 0) {
-            diagnostic.* = loadDiagnostic(input, failure, err);
-        }
-    }
-}
-
-fn loadDiagnostic(input: []const u8, failure: loader.LoadFailure, err: Error) diagnostics.Diagnostic {
-    const message = switch (failure) {
-        .document_count_limit => "loader exceeded configured document count limit",
-        .alias_count_limit => "loader exceeded configured alias count limit",
-        .alias_expansion_limit => "loader exceeded configured alias expansion limit",
-        .invalid_graph => "loader rejected invalid representation graph",
-        .invalid_standard_tag => "loader rejected tag for node kind",
-        .invalid_scalar_tag => "loader rejected invalid tagged scalar",
-        .unknown_tag => "loader rejected unknown tag",
-        .duplicate_key => "loader rejected duplicate mapping key",
-        .unknown => switch (err) {
-            ParseError.InvalidSyntax => "loader rejected invalid YAML graph",
-            ParseError.Unsupported => "loader exceeded configured safety limit",
-            else => "loader failed",
-        },
-    };
-
-    return common_diagnostic.atOffset(input, input.len, message);
-}
 
 test "loadWithOptions sets fallback diagnostic for multi-document single load" {
     const input = "---\none\n---\ntwo\n";
@@ -1098,11 +1048,11 @@ test "loadWithOptions sets fallback diagnostic for empty single load" {
 test "load diagnostic maps unknown loader failures by parse error" {
     const input = "key: value\n";
 
-    const invalid = loadDiagnostic(input, .unknown, ParseError.InvalidSyntax);
+    const invalid = diagnostic_policy.loadFailureDiagnostic(input, .unknown, ParseError.InvalidSyntax);
     try std.testing.expectEqualStrings("loader rejected invalid YAML graph", invalid.message);
     try std.testing.expectEqual(input.len, invalid.offset);
 
-    const unsupported = loadDiagnostic(input, .unknown, ParseError.Unsupported);
+    const unsupported = diagnostic_policy.loadFailureDiagnostic(input, .unknown, ParseError.Unsupported);
     try std.testing.expectEqualStrings("loader exceeded configured safety limit", unsupported.message);
     try std.testing.expectEqual(input.len, unsupported.offset);
 }
