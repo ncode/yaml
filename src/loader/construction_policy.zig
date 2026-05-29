@@ -205,3 +205,171 @@ inline fn isGraphSetNullValue(node: *const graph.Node) bool {
 test {
     std.testing.refAllDecls(@This());
 }
+
+test "construction policy: resolves scalar values and classifies scalar failures" {
+    var load_failure: LoadFailure = .unknown;
+    const policy: Policy = .{
+        .schema = .core,
+        .unknown_tag_behavior = .reject,
+        .failure = &load_failure,
+    };
+
+    const resolved = (try policy.validateAndResolveScalar(.{
+        .value = "true",
+        .is_plain = true,
+        .tag = null,
+    })).?;
+    try std.testing.expectEqual(schema.ResolvedScalar{ .bool_value = true }, resolved);
+
+    const bool_node = nodeFromResolvedScalar(resolved, "anchor", null);
+    try std.testing.expect(bool_node == .bool_value);
+    try std.testing.expect(bool_node.bool_value.value);
+    try std.testing.expectEqualStrings("anchor", bool_node.bool_value.anchor.?);
+
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateAndResolveScalar(.{
+        .value = "value",
+        .is_plain = true,
+        .tag = "!local",
+    }));
+    try std.testing.expectEqual(LoadFailure.unknown_tag, load_failure);
+
+    load_failure = .unknown;
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateAndResolveScalar(.{
+        .value = "not-an-int",
+        .is_plain = true,
+        .tag = "tag:yaml.org,2002:int",
+    }));
+    try std.testing.expectEqual(LoadFailure.invalid_scalar_tag, load_failure);
+
+    load_failure = .unknown;
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateAndResolveScalar(.{
+        .value = "not-a-date",
+        .is_plain = true,
+        .tag = "tag:yaml.org,2002:timestamp",
+    }));
+    try std.testing.expectEqual(LoadFailure.invalid_standard_tag, load_failure);
+
+    load_failure = .duplicate_key;
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateTag("tag:yaml.org,2002:seq", .scalar));
+    try std.testing.expectEqual(LoadFailure.duplicate_key, load_failure);
+}
+
+test "construction policy: validates graph collection tag content" {
+    var load_failure: LoadFailure = .unknown;
+    const policy: Policy = .{
+        .schema = .core,
+        .unknown_tag_behavior = .preserve,
+        .failure = &load_failure,
+    };
+
+    const scalar_item: graph.Node = .{ .scalar = .{ .value = "item" } };
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateGraphSequence(.{
+        .items = &.{&scalar_item},
+        .tag = "tag:yaml.org,2002:omap",
+    }));
+    try std.testing.expectEqual(LoadFailure.invalid_standard_tag, load_failure);
+
+    load_failure = .unknown;
+    try policy.validateGraphSequence(.{
+        .items = &.{&scalar_item},
+        .tag = "tag:yaml.org,2002:seq",
+    });
+    try std.testing.expectEqual(LoadFailure.unknown, load_failure);
+
+    const key: graph.Node = .{ .scalar = .{ .value = "key" } };
+    const null_value: graph.Node = .{ .scalar = .{ .value = "~" } };
+    const non_null_value: graph.Node = .{ .scalar = .{ .value = "value" } };
+    try policy.validateGraphMapping(.{
+        .pairs = &.{.{ .key = &key, .value = &null_value }},
+        .tag = "tag:yaml.org,2002:set",
+    });
+
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateGraphMapping(.{
+        .pairs = &.{.{ .key = &key, .value = &non_null_value }},
+        .tag = "tag:yaml.org,2002:set",
+    }));
+    try std.testing.expectEqual(LoadFailure.invalid_standard_tag, load_failure);
+}
+
+test "construction policy: validates constructed collection tags and duplicates" {
+    var load_failure: LoadFailure = .unknown;
+    const policy: Policy = .{
+        .schema = .core,
+        .unknown_tag_behavior = .preserve,
+        .failure = &load_failure,
+    };
+
+    const key_a: Node = .{ .scalar = .{ .value = "a" } };
+    const key_a_again: Node = .{ .scalar = .{ .value = "a" } };
+    const value: Node = .{ .scalar = .{ .value = "value" } };
+    const null_value: Node = .{ .null_value = .{} };
+    const valid_pair = MappingPair{ .key = &key_a, .value = &null_value };
+    const duplicate_pairs = [_]MappingPair{
+        valid_pair,
+        .{ .key = &key_a_again, .value = &null_value },
+    };
+
+    try policy.validateConstructedMapping(std.testing.allocator, &.{valid_pair}, "tag:yaml.org,2002:set", .reject);
+    try policy.validateDuplicateMappingKeys(std.testing.allocator, &duplicate_pairs, .allow);
+
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateConstructedMapping(
+        std.testing.allocator,
+        &.{.{ .key = &key_a, .value = &value }},
+        "tag:yaml.org,2002:set",
+        .reject,
+    ));
+    try std.testing.expectEqual(LoadFailure.invalid_standard_tag, load_failure);
+
+    load_failure = .unknown;
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateConstructedMapping(
+        std.testing.allocator,
+        &duplicate_pairs,
+        "tag:yaml.org,2002:set",
+        .reject,
+    ));
+    try std.testing.expectEqual(LoadFailure.invalid_standard_tag, load_failure);
+
+    load_failure = .unknown;
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateDuplicateMappingKeys(
+        std.testing.allocator,
+        &duplicate_pairs,
+        .reject,
+    ));
+    try std.testing.expectEqual(LoadFailure.duplicate_key, load_failure);
+
+    const omap_item_a: Node = .{ .mapping = .{ .pairs = &.{valid_pair} } };
+    const omap_item_b: Node = .{ .mapping = .{ .pairs = &.{.{ .key = &key_a_again, .value = &null_value }} } };
+    load_failure = .unknown;
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateConstructedSequence(
+        &.{ &omap_item_a, &omap_item_b },
+        "tag:yaml.org,2002:omap",
+    ));
+    try std.testing.expectEqual(LoadFailure.invalid_standard_tag, load_failure);
+
+    const scalar_item: Node = .{ .scalar = .{ .value = "item" } };
+    load_failure = .duplicate_key;
+    try std.testing.expectError(ParseError.InvalidSyntax, policy.validateConstructedSequence(
+        &.{&scalar_item},
+        "tag:yaml.org,2002:pairs",
+    ));
+    try std.testing.expectEqual(LoadFailure.duplicate_key, load_failure);
+}
+
+test "construction policy: creates public nodes for each resolved scalar kind" {
+    const null_node = nodeFromResolvedScalar(.null_value, "a", "tag:yaml.org,2002:null");
+    try std.testing.expect(null_node == .null_value);
+    try std.testing.expectEqualStrings("a", null_node.null_value.anchor.?);
+    try std.testing.expectEqualStrings("tag:yaml.org,2002:null", null_node.null_value.tag.?);
+
+    const bool_node = nodeFromResolvedScalar(.{ .bool_value = false }, null, null);
+    try std.testing.expect(bool_node == .bool_value);
+    try std.testing.expect(!bool_node.bool_value.value);
+
+    const int_node = nodeFromResolvedScalar(.{ .int_value = -42 }, null, null);
+    try std.testing.expect(int_node == .int_value);
+    try std.testing.expectEqual(@as(i128, -42), int_node.int_value.value);
+
+    const float_node = nodeFromResolvedScalar(.{ .float_value = 1.5 }, null, null);
+    try std.testing.expect(float_node == .float_value);
+    try std.testing.expectEqual(@as(f64, 1.5), float_node.float_value.value);
+}
