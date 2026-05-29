@@ -1,47 +1,51 @@
 //! Purpose: Parse YAML block sequence documents and nodes.
 //! Owns: Top-level, compact, indented, indentless, and nested block sequence parsing.
 //! Does not own: Mapping document parsing, scanning, schema resolution, or loading.
-//! Depends on: parser.zig shared parser aliases and focused parser helpers.
+//! Depends on: parser/internal.zig, parser/scalar.zig, parser/block_mapping.zig, scanner/scanner.zig, and common/limit.zig.
 //! Tested by: tests/unit/parser/parser_tokens_test.zig and direct conformance tests.
 
 const std = @import("std");
-const parser = @import("parser.zig");
+const block_mapping = @import("block_mapping.zig");
+const common_limit = @import("../common/limit.zig");
+const internal = @import("internal.zig");
+const scalar_parser = @import("scalar.zig");
+const scanner = @import("../scanner/scanner.zig");
+const types = @import("event.zig");
 
-const scanner = parser.scanner;
-const Error = parser.Error;
-const ParseError = parser.ParseError;
-const max_block_depth = parser.max_block_depth;
-const NodeProperties = parser.NodeProperties;
-const TokenDirectives = parser.TokenDirectives;
-const PlainBlockNode = parser.PlainBlockNode;
-const parseFlowPlainBlockNode = parser.parseFlowPlainBlockNode;
-const consumeBlockCollectionProperties = parser.consumeBlockCollectionProperties;
-const isBlockSequenceItemScalar = parser.isBlockSequenceItemScalar;
-const isPlainScalarToken = parser.isPlainScalarToken;
-const parseBlockScalarToken = parser.parseBlockScalarToken;
-const parsePlainBlockSequenceItemScalarTokenRun = parser.parsePlainBlockSequenceItemScalarTokenRun;
-const parsePlainScalarTokenRun = parser.parsePlainScalarTokenRun;
-const parseScalarToken = parser.parseScalarToken;
-const consumeLeadingDirectives = parser.consumeLeadingDirectives;
-const consumeNodeProperties = parser.consumeNodeProperties;
-const consumeDocumentStartContent = parser.consumeDocumentStartContent;
-const emptyScalarNode = parser.emptyScalarNode;
-const flowCollectionDescendantSpansLines = parser.flowCollectionDescendantSpansLines;
-const hasNodeProperties = parser.hasNodeProperties;
-const isFlowStartToken = parser.isFlowStartToken;
-const isPlainBlockOmittedValueBoundary = parser.isPlainBlockOmittedValueBoundary;
-const isPlainBlockOmittedValueBoundaryAtIndent = parser.isPlainBlockOmittedValueBoundaryAtIndent;
-const mergeNodeProperties = parser.mergeNodeProperties;
-const nodePropertyLineStartsNestedBlockMappingKey = parser.nodePropertyLineStartsNestedBlockMappingKey;
-const skipComments = parser.skipComments;
-const validateAliasHasNoFollowingContent = parser.validateAliasHasNoFollowingContent;
-const validateBlockFlowScalarToken = parser.validateBlockFlowScalarToken;
-const validateFlowContinuationIndent = parser.validateFlowContinuationIndent;
-const validateNodePropertiesSeparatedFromScalar = parser.validateNodePropertiesSeparatedFromScalar;
-const parseNestedBlockCollectionAfterPropertyLine = parser.parseNestedBlockCollectionAfterPropertyLine;
-const parseCompactExplicitBlockMappingNode = parser.parseCompactExplicitBlockMappingNode;
-const parseCompactPlainBlockMappingNode = parser.parseCompactPlainBlockMappingNode;
-const parseNestedPlainBlockMappingNode = parser.parseNestedPlainBlockMappingNode;
+const Error = types.Error;
+const ParseError = types.ParseError;
+const max_block_depth = common_limit.max_parse_collection_depth;
+const NodeProperties = internal.NodeProperties;
+const TokenDirectives = internal.TokenDirectives;
+const PlainBlockNode = internal.PlainBlockNode;
+const parseFlowPlainBlockNode = internal.parseFlowPlainBlockNode;
+const consumeBlockCollectionProperties = internal.consumeBlockCollectionProperties;
+const isBlockSequenceItemScalar = scalar_parser.isBlockSequenceItemScalar;
+const isPlainScalarToken = scalar_parser.isPlainScalarToken;
+const parseBlockScalarToken = scalar_parser.parseBlockScalarToken;
+const parsePlainBlockSequenceItemScalarTokenRun = scalar_parser.parsePlainBlockSequenceItemScalarTokenRun;
+const parsePlainScalarTokenRun = scalar_parser.parsePlainScalarTokenRun;
+const parseScalarToken = scalar_parser.parseScalarToken;
+const consumeLeadingDirectives = internal.consumeLeadingDirectives;
+const consumeNodeProperties = internal.consumeNodeProperties;
+const consumeDocumentStartContent = internal.consumeDocumentStartContent;
+const emptyScalarNode = internal.emptyScalar;
+const flowCollectionDescendantSpansLines = internal.flowCollectionDescendantSpansLines;
+const hasNodeProperties = internal.has;
+const isFlowStartToken = internal.isFlowStartToken;
+const isPlainBlockOmittedValueBoundary = internal.isPlainBlockOmittedValueBoundary;
+const isPlainBlockOmittedValueBoundaryAtIndent = internal.isPlainBlockOmittedValueBoundaryAtIndent;
+const mergeNodeProperties = internal.merge;
+const nodePropertyLineStartsNestedBlockMappingKey = internal.nodePropertyLineStartsNestedBlockMappingKey;
+const skipComments = internal.skipComments;
+const validateAliasHasNoFollowingContent = internal.validateAliasHasNoFollowingContent;
+const validateBlockFlowScalarToken = scalar_parser.validateBlockFlowScalarToken;
+const validateFlowContinuationIndent = internal.validateFlowContinuationIndent;
+const validateNodePropertiesSeparatedFromScalar = internal.validateNodePropertiesSeparatedFromScalar;
+const parseNestedBlockCollectionAfterPropertyLine = block_mapping.parseNestedBlockCollectionAfterPropertyLine;
+const parseCompactExplicitBlockMappingNode = block_mapping.parseCompactExplicitBlockMappingNode;
+const parseCompactPlainBlockMappingNode = block_mapping.parseCompactPlainBlockMappingNode;
+const parseNestedPlainBlockMappingNode = block_mapping.parseNestedPlainBlockMappingNode;
 
 pub const PlainSequenceDocumentTokens = struct {
     items: []const PlainBlockNode,

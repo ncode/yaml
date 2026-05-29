@@ -15,3 +15,20 @@ comptime {
     _ = @import("dump_test.zig");
     _ = @import("typed_test.zig");
 }
+
+const std = @import("std");
+const yaml = @import("yaml");
+
+test "public value graph type sizes stay stable" {
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(yaml.Node));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(yaml.ScalarNode));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(yaml.NullNode));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(yaml.BoolNode));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(yaml.IntNode));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(yaml.FloatNode));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(yaml.MappingPair));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(yaml.SequenceNode));
+    try std.testing.expectEqual(@as(usize, 56), @sizeOf(yaml.MappingNode));
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(yaml.LoadedDocument));
+    try std.testing.expectEqual(@as(usize, 48), @sizeOf(yaml.LoadedStream));
+}

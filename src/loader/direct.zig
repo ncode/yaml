@@ -5,15 +5,14 @@
 //! Tested by: tests/unit/loader/loader_test.zig and public loader conformance tests.
 
 const std = @import("std");
+const construction_policy = @import("construction_policy.zig");
 const diagnostic = @import("../common/diagnostic.zig");
-const duplicate_key = @import("duplicate_key.zig");
 const failure = @import("failure.zig");
 const limit = @import("limit.zig");
 const node_pool = @import("../common/node_pool.zig");
 const options = @import("options.zig");
 const parser_event = @import("../parser/event.zig");
 const schema = @import("../schema/schema.zig");
-const tag = @import("../schema/tag.zig");
 const value_model = @import("../value/value.zig");
 
 const DuplicateKeyBehavior = options.DuplicateKeyBehavior;
@@ -26,6 +25,7 @@ const NodePool = node_pool.Pool(Node);
 const ParseError = diagnostic.ParseError;
 const Schema = schema.Schema;
 const UnknownTagBehavior = options.UnknownTagBehavior;
+const ConstructionPolicy = construction_policy.Policy;
 
 /// Returns true when the direct loader supports the event stream shape.
 pub fn supports(events: []const Event) bool {
@@ -202,20 +202,8 @@ const DirectLoader = struct {
 
     fn constructScalar(self: *DirectLoader, scalar: parser_event.Scalar) Error!*const Node {
         const node = try self.nodes.create();
-        try self.validateTag(scalar.tag, .scalar);
-        tag.validateStandardBinaryContent(scalar.tag, scalar.value) catch |err| {
-            self.recordFailure(.invalid_standard_tag);
-            return err;
-        };
-        tag.validateStandardTimestampContent(scalar.tag, scalar.value) catch |err| {
-            self.recordFailure(.invalid_standard_tag);
-            return err;
-        };
 
-        node.* = (self.resolveSchemaScalar(scalar) catch |err| {
-            self.recordFailure(.invalid_scalar_tag);
-            return err;
-        }) orelse .{ .scalar = .{
+        node.* = (try self.resolveSchemaScalar(scalar)) orelse .{ .scalar = .{
             .value = try self.retainSlice(scalar.value),
             .style = scalar.style,
             .anchor = try self.retainOptionalSlice(scalar.anchor),
@@ -226,7 +214,7 @@ const DirectLoader = struct {
 
     fn constructSequence(self: *DirectLoader, child_count: usize, collection: parser_event.CollectionStart) Error!*const Node {
         const node = try self.nodes.create();
-        try self.validateTag(collection.tag, .sequence);
+        try self.constructionPolicy().validateTag(collection.tag, .sequence);
 
         var items: std.ArrayList(*const Node) = .empty;
         errdefer items.deinit(self.allocator);
@@ -245,20 +233,13 @@ const DirectLoader = struct {
             .anchor = try self.retainOptionalSlice(collection.anchor),
             .tag = try self.retainOptionalSlice(collection.tag),
         } };
-        if (tag.isStandardOmapTag(collection.tag)) {
-            duplicate_key.validateUniqueOrderedMapKeys(owned_items) catch |err| {
-                self.recordFailure(.invalid_standard_tag);
-                return err;
-            };
-        } else if (tag.isStandardPairsTag(collection.tag)) {
-            try self.validateStandardSequenceContent(owned_items);
-        }
+        try self.constructionPolicy().validateConstructedSequence(owned_items, collection.tag);
         return node;
     }
 
     fn constructMapping(self: *DirectLoader, child_count: usize, collection: parser_event.CollectionStart) Error!*const Node {
         const node = try self.nodes.create();
-        try self.validateTag(collection.tag, .mapping);
+        try self.constructionPolicy().validateTag(collection.tag, .mapping);
 
         var pairs: std.ArrayList(MappingPair) = .empty;
         errdefer pairs.deinit(self.allocator);
@@ -282,49 +263,13 @@ const DirectLoader = struct {
             .anchor = try self.retainOptionalSlice(collection.anchor),
             .tag = try self.retainOptionalSlice(collection.tag),
         } };
-        if (tag.isStandardSetTag(collection.tag)) {
-            try self.validateStandardSetContent(owned_pairs);
-            duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
-                self.recordFailure(.invalid_standard_tag);
-                return err;
-            };
-        } else if (self.duplicate_key_behavior == .reject) {
-            duplicate_key.validateUniqueMappingKeys(self.temporary_allocator, owned_pairs) catch |err| {
-                self.recordFailure(.duplicate_key);
-                return err;
-            };
-        }
+        try self.constructionPolicy().validateConstructedMapping(
+            self.temporary_allocator,
+            owned_pairs,
+            collection.tag,
+            self.duplicate_key_behavior,
+        );
         return node;
-    }
-
-    fn validateTag(self: *DirectLoader, node_tag: ?[]const u8, kind: tag.NodeKind) Error!void {
-        tag.validateStandardTagKind(node_tag, kind) catch |err| {
-            self.recordFailure(.invalid_standard_tag);
-            return err;
-        };
-
-        if (self.unknown_tag_behavior == .reject and tag.isUnknownTag(node_tag)) {
-            self.recordFailure(.unknown_tag);
-            return ParseError.InvalidSyntax;
-        }
-    }
-
-    fn validateStandardSequenceContent(self: *DirectLoader, items: []const *const Node) Error!void {
-        for (items) |item| {
-            if (item.* != .mapping or item.mapping.pairs.len != 1) {
-                self.recordFailure(.invalid_standard_tag);
-                return ParseError.InvalidSyntax;
-            }
-        }
-    }
-
-    fn validateStandardSetContent(self: *DirectLoader, pairs: []const MappingPair) Error!void {
-        for (pairs) |pair| {
-            if (!isSetNullValue(pair.value)) {
-                self.recordFailure(.invalid_standard_tag);
-                return ParseError.InvalidSyntax;
-            }
-        }
     }
 
     fn invalidGraph(self: *DirectLoader) Error {
@@ -339,33 +284,23 @@ const DirectLoader = struct {
     }
 
     fn resolveSchemaScalar(self: *DirectLoader, scalar_value: parser_event.Scalar) Error!?Node {
-        const resolved = (try schema.resolveScalar(
-            self.schema,
-            scalar_value.value,
-            scalar_value.style == .plain,
-            scalar_value.tag,
-        )) orelse return null;
+        const resolved = (try self.constructionPolicy().validateAndResolveScalar(.{
+            .value = scalar_value.value,
+            .is_plain = scalar_value.style == .plain,
+            .tag = scalar_value.tag,
+        })) orelse return null;
+        return construction_policy.nodeFromResolvedScalar(
+            resolved,
+            try self.retainOptionalSlice(scalar_value.anchor),
+            try self.retainOptionalSlice(scalar_value.tag),
+        );
+    }
 
-        return switch (resolved) {
-            .null_value => .{ .null_value = .{
-                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
-                .tag = try self.retainOptionalSlice(scalar_value.tag),
-            } },
-            .bool_value => |bool_value| .{ .bool_value = .{
-                .value = bool_value,
-                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
-                .tag = try self.retainOptionalSlice(scalar_value.tag),
-            } },
-            .int_value => |int_value| .{ .int_value = .{
-                .value = int_value,
-                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
-                .tag = try self.retainOptionalSlice(scalar_value.tag),
-            } },
-            .float_value => |float_value| .{ .float_value = .{
-                .value = float_value,
-                .anchor = try self.retainOptionalSlice(scalar_value.anchor),
-                .tag = try self.retainOptionalSlice(scalar_value.tag),
-            } },
+    fn constructionPolicy(self: *DirectLoader) ConstructionPolicy {
+        return .{
+            .schema = self.schema,
+            .unknown_tag_behavior = self.unknown_tag_behavior,
+            .failure = self.failure,
         };
     }
 
@@ -437,14 +372,6 @@ fn recordFailure(load_failure: ?*LoadFailure, load_failure_value: LoadFailure) v
     if (load_failure) |target| {
         if (target.* == .unknown) target.* = load_failure_value;
     }
-}
-
-fn isSetNullValue(node: *const Node) bool {
-    return switch (node.*) {
-        .null_value => true,
-        .scalar => |scalar| schema.isCoreNullScalar(scalar.value, scalar.style == .plain, scalar.tag),
-        else => false,
-    };
 }
 
 test {

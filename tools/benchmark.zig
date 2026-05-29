@@ -100,7 +100,17 @@ pub fn main(init: std.process.Init) !void {
     defer deinitFixtures(allocator, fixtures);
 
     try stdout.print("yaml benchmark\n", .{});
-    try stdout.print("types scanner_token_size={} parser_event_size={}\n", .{ @sizeOf(yaml_internal.scanner.Token), @sizeOf(yaml_internal.parser.Event) });
+    try stdout.print("types scanner_token_size={} parser_event_size={} value_node_size={} scalar_node_size={} sequence_node_size={} mapping_pair_size={} mapping_node_size={} loaded_document_size={} loaded_stream_size={}\n", .{
+        @sizeOf(yaml_internal.scanner.Token),
+        @sizeOf(yaml_internal.parser.Event),
+        @sizeOf(yaml_internal.value.Node),
+        @sizeOf(yaml_internal.value.ScalarNode),
+        @sizeOf(yaml_internal.value.SequenceNode),
+        @sizeOf(yaml_internal.value.MappingPair),
+        @sizeOf(yaml_internal.value.MappingNode),
+        @sizeOf(yaml_internal.value.LoadedDocument),
+        @sizeOf(yaml_internal.value.LoadedStream),
+    });
     try stdout.print("format: input bytes api iterations ns_per_op bytes_per_sec checksum\n", .{});
 
     for (fixtures) |fixture| {

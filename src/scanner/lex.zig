@@ -227,39 +227,39 @@ fn isYamlPrintableCodepoint(codepoint: u21) bool {
         (codepoint >= 0x10000 and codepoint <= 0x10ffff);
 }
 
-pub fn consumeDoubleQuoted(scanner: anytype) Error!void {
-    if (scanner.index >= scanner.input.len) return error.InvalidSyntax;
+pub fn consumeDoubleQuoted(input: []const u8, index: *usize) Error!void {
+    if (index.* >= input.len) return error.InvalidSyntax;
 
-    if (isLineBreakByte(scanner.input[scanner.index])) {
-        scanner.index = consumeLineBreak(scanner.input, scanner.index);
+    if (isLineBreakByte(input[index.*])) {
+        index.* = consumeLineBreak(input, index.*);
         return;
     }
 
-    switch (scanner.input[scanner.index]) {
+    switch (input[index.*]) {
         '0', 'a', 'b', 't', '\t', 'n', 'v', 'f', 'r', 'e', ' ', '"', '/', '\\', 'N', '_', 'L', 'P' => {
-            scanner.index += 1;
+            index.* += 1;
         },
-        'x' => try consumeHex(scanner, 2),
-        'u' => try consumeHex(scanner, 4),
-        'U' => try consumeHex(scanner, 8),
+        'x' => try consumeHex(input, index, 2),
+        'u' => try consumeHex(input, index, 4),
+        'U' => try consumeHex(input, index, 8),
         else => return error.InvalidSyntax,
     }
 }
 
-fn consumeHex(scanner: anytype, digit_count: usize) Error!void {
-    const digits_start = scanner.index + 1;
+fn consumeHex(input: []const u8, index: *usize, digit_count: usize) Error!void {
+    const digits_start = index.* + 1;
     const digits_end = digits_start + digit_count;
-    if (digits_end > scanner.input.len) return error.InvalidSyntax;
+    if (digits_end > input.len) return error.InvalidSyntax;
 
     var codepoint: u21 = 0;
-    for (scanner.input[digits_start..digits_end]) |byte| {
+    for (input[digits_start..digits_end]) |byte| {
         const value = hexDigitValue(byte) orelse return error.InvalidSyntax;
         if (codepoint > (0x10ffff - value) / 16) return error.InvalidSyntax;
         codepoint = codepoint * 16 + value;
     }
     if (!isValidEscapedCodepoint(codepoint)) return error.InvalidSyntax;
 
-    scanner.index = digits_end;
+    index.* = digits_end;
 }
 
 test "scanner lex: top-level block scalar content can infer zero indentation" {
@@ -297,40 +297,35 @@ test "scanner: printable validation accepts YAML line break code points" {
     try validate("line\xe2\x80\xa9next");
 }
 
-const TestScanner = struct {
-    input: []const u8,
-    index: usize = 0,
-};
-
 test "scanner escape: accepts YAML named double quoted escapes" {
     const accepted = [_][]const u8{ "0", "a", "b", "t", "\t", "n", "v", "f", "r", "e", " ", "\"", "/", "\\", "N", "_", "L", "P" };
     for (accepted) |input| {
-        var scanner = TestScanner{ .input = input };
-        try consumeDoubleQuoted(&scanner);
-        try std.testing.expectEqual(input.len, scanner.index);
+        var index: usize = 0;
+        try consumeDoubleQuoted(input, &index);
+        try std.testing.expectEqual(input.len, index);
     }
 }
 
 test "scanner escape: accepts escaped line breaks and valid hex code points" {
-    var lf = TestScanner{ .input = "\nnext" };
-    try consumeDoubleQuoted(&lf);
-    try std.testing.expectEqual(@as(usize, 1), lf.index);
+    var lf_index: usize = 0;
+    try consumeDoubleQuoted("\nnext", &lf_index);
+    try std.testing.expectEqual(@as(usize, 1), lf_index);
 
-    var crlf = TestScanner{ .input = "\r\nnext" };
-    try consumeDoubleQuoted(&crlf);
-    try std.testing.expectEqual(@as(usize, 2), crlf.index);
+    var crlf_index: usize = 0;
+    try consumeDoubleQuoted("\r\nnext", &crlf_index);
+    try std.testing.expectEqual(@as(usize, 2), crlf_index);
 
     inline for (.{ "x20", "u2028", "U0010FFFF" }) |input| {
-        var scanner = TestScanner{ .input = input };
-        try consumeDoubleQuoted(&scanner);
-        try std.testing.expectEqual(input.len, scanner.index);
+        var index: usize = 0;
+        try consumeDoubleQuoted(input, &index);
+        try std.testing.expectEqual(input.len, index);
     }
 }
 
 test "scanner escape: rejects malformed hex and invalid escaped code points" {
     const rejected = [_][]const u8{ "", "q", "x0", "xzz", "u12", "uD800", "uDFFF", "U00110000", "UFFFFFFFF" };
     for (rejected) |input| {
-        var scanner = TestScanner{ .input = input };
-        try std.testing.expectError(error.InvalidSyntax, consumeDoubleQuoted(&scanner));
+        var index: usize = 0;
+        try std.testing.expectError(error.InvalidSyntax, consumeDoubleQuoted(input, &index));
     }
 }

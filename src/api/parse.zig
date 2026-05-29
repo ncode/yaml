@@ -1,18 +1,17 @@
 //! Purpose: Public event parsing API.
 //! Owns: Input limits, scanner invocation, and scanner/token parser execution.
 //! Does not own: Scanner tokenization, token parser internals, loading, or emitting.
-//! Depends on: scanner/scanner.zig, parser/api.zig, parser/event.zig, parser/diagnostics.zig, api/options.zig, api/diagnostics.zig, common/diagnostic.zig.
+//! Depends on: scanner/scanner.zig, parser/api.zig, parser/event.zig, api/options.zig, api/diagnostics.zig, api/diagnostic_policy.zig.
 //! Tested by: tests/unit/api/root_api_test.zig, tests/conformance/yaml_suite_runner.zig.
 
 const std = @import("std");
-const common_diagnostic = @import("../common/diagnostic.zig");
+const diagnostic_policy = @import("diagnostic_policy.zig");
 const diagnostics = @import("diagnostics.zig");
 const event_types = @import("../parser/event.zig");
 const common_limit = @import("../common/limit.zig");
 const options_api = @import("options.zig");
 const token_parser = @import("../parser/api.zig");
 const scanner = @import("../scanner/scanner.zig");
-const parser_diagnostics = @import("../parser/diagnostics.zig");
 
 const Event = event_types.Event;
 const EventStats = token_parser.EventStats;
@@ -69,19 +68,13 @@ pub fn parseEvents(allocator: std.mem.Allocator, input: []const u8) Error!EventS
 pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, options: ParseOptions) Error!EventStream {
     if (options.max_input_bytes) |max_input_bytes| {
         if (input.len > max_input_bytes) {
-            if (options.diagnostic) |diagnostic| {
-                diagnostic.* = diagnosticAt(input, max_input_bytes, "input exceeds configured size limit");
-            }
+            diagnostic_policy.setLimit(options.diagnostic, input, .{ .input_size = max_input_bytes });
             return ParseError.Unsupported;
         }
     }
 
     const result = parseEventsInternal(allocator, input, options) catch |err| {
-        if (options.diagnostic) |diagnostic| {
-            if (diagnostic.message.len == 0) {
-                diagnostic.* = parser_diagnostics.diagnosticForParseError(input, err);
-            }
-        }
+        diagnostic_policy.setParseFailure(options.diagnostic, input, err);
         return err;
     };
     var stream = result.stream;
@@ -90,9 +83,7 @@ pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, o
         const event_count = if (result.stats) |stats| stats.event_count else stream.events.len;
         if (event_count > max_event_count) {
             stream.deinit();
-            if (options.diagnostic) |diagnostic| {
-                diagnostic.* = diagnosticAt(input, input.len, "event count exceeds configured limit");
-            }
+            diagnostic_policy.setLimit(options.diagnostic, input, .event_count);
             return ParseError.Unsupported;
         }
     }
@@ -101,9 +92,7 @@ pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, o
         const scalar_too_long = if (result.stats) |stats| stats.max_scalar_bytes > max_scalar_bytes else hasScalarLongerThan(stream.events, max_scalar_bytes);
         if (scalar_too_long) {
             stream.deinit();
-            if (options.diagnostic) |diagnostic| {
-                diagnostic.* = diagnosticAt(input, input.len, "scalar exceeds configured size limit");
-            }
+            diagnostic_policy.setLimit(options.diagnostic, input, .scalar_size);
             return ParseError.Unsupported;
         }
     }
@@ -115,15 +104,11 @@ pub fn parseEventsWithOptions(allocator: std.mem.Allocator, input: []const u8, o
         hasNestingDeeperThan(stream.events, max_nesting_depth);
     if (nesting_too_deep) {
         stream.deinit();
-        if (options.diagnostic) |diagnostic| {
-            diagnostic.* = diagnosticAt(input, input.len, "nesting depth exceeds configured limit");
-        }
+        diagnostic_policy.setLimit(options.diagnostic, input, .nesting_depth);
         return ParseError.Unsupported;
     }
 
-    if (options.diagnostic) |diagnostic| {
-        diagnostic.* = .{};
-    }
+    diagnostic_policy.clear(options.diagnostic);
     return stream;
 }
 
@@ -163,19 +148,13 @@ fn parseEventsInternal(allocator: std.mem.Allocator, input: []const u8, options:
 
     if (options.max_token_count) |max_token_count| {
         if (token_stream.tokens.len > max_token_count) {
-            if (options.diagnostic) |diagnostic| {
-                diagnostic.* = diagnosticAt(input, input.len, "token count exceeds configured limit");
-            }
+            diagnostic_policy.setLimit(options.diagnostic, input, .token_count);
             return ParseError.Unsupported;
         }
     }
 
     const parsed = try token_parser.parseTokensWithStats(allocator, token_stream.tokens);
     return .{ .stream = parsed.stream, .stats = parsed.stats };
-}
-
-fn diagnosticAt(input: []const u8, offset: usize, message: []const u8) diagnostics.Diagnostic {
-    return common_diagnostic.atOffset(input, offset, message);
 }
 
 test "parse api: scalar limit helper detects only oversized scalar events" {
