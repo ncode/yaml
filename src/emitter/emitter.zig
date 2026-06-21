@@ -156,6 +156,41 @@ pub const State = struct {
     }
 };
 
+pub const OutputBuffer = struct {
+    const Self = @This();
+
+    list: std.ArrayList(u8) = .empty,
+    max_output_bytes: ?usize = null,
+    limit_exceeded: bool = false,
+
+    pub fn append(self: *Self, allocator: std.mem.Allocator, byte: u8) std.mem.Allocator.Error!void {
+        try self.checkCanAppend(1);
+        try self.list.append(allocator, byte);
+    }
+
+    pub fn appendSlice(self: *Self, allocator: std.mem.Allocator, bytes: []const u8) std.mem.Allocator.Error!void {
+        try self.checkCanAppend(bytes.len);
+        try self.list.appendSlice(allocator, bytes);
+    }
+
+    fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        self.list.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn toOwnedSlice(self: *Self, allocator: std.mem.Allocator) std.mem.Allocator.Error![]u8 {
+        return self.list.toOwnedSlice(allocator);
+    }
+
+    fn checkCanAppend(self: *Self, additional_bytes: usize) std.mem.Allocator.Error!void {
+        const max_output_bytes = self.max_output_bytes orelse return;
+        if (self.list.items.len > max_output_bytes or additional_bytes > max_output_bytes - self.list.items.len) {
+            self.limit_exceeded = true;
+            return error.OutOfMemory;
+        }
+    }
+};
+
 /// Emits a YAML stream from parser events. Caller owns the returned memory.
 pub fn emitEvents(allocator: std.mem.Allocator, events: []const Event) Error![]u8 {
     return emitEventsWithOptions(allocator, events, .{});
@@ -313,9 +348,18 @@ pub fn dumpStreamToWriterWithOptions(
 }
 
 pub fn emit(self: *State) Error![]u8 {
-    var out: std.ArrayList(u8) = .empty;
+    var out: OutputBuffer = .{ .max_output_bytes = self.max_output_bytes };
     errdefer out.deinit(self.allocator);
 
+    emitIntoBuffer(self, &out) catch |err| {
+        if (err == error.OutOfMemory and out.limit_exceeded) return ParseError.Unsupported;
+        return err;
+    };
+
+    return out.toOwnedSlice(self.allocator);
+}
+
+fn emitIntoBuffer(self: *State, out: anytype) Error!void {
     try self.expectEvent(.stream_start);
 
     var document_index: usize = 0;
@@ -347,9 +391,9 @@ pub fn emit(self: *State) Error![]u8 {
 
         if (emit_yaml_version) {
             const version = document_start.yaml_version.?;
-            try out.appendSlice(self.allocator, "%YAML ");
-            try out.appendSlice(self.allocator, version);
-            try out.append(self.allocator, '\n');
+            try out.*.appendSlice(self.allocator, "%YAML ");
+            try out.*.appendSlice(self.allocator, version);
+            try out.*.append(self.allocator, '\n');
         }
 
         if (emit_tag_directives) {
@@ -359,21 +403,21 @@ pub fn emit(self: *State) Error![]u8 {
         }
 
         if (emit_document_start) {
-            try out.appendSlice(self.allocator, "---");
+            try out.*.appendSlice(self.allocator, "---");
         }
 
         if (self.index >= self.events.len) return ParseError.InvalidSyntax;
         if (self.events[self.index] == .document_end) {
-            if (emit_document_start) try out.append(self.allocator, '\n');
+            if (emit_document_start) try out.*.append(self.allocator, '\n');
         } else if (shouldEmitEmptyDocument(self)) {
-            if (emit_document_start) try out.append(self.allocator, '\n');
+            if (emit_document_start) try out.*.append(self.allocator, '\n');
             self.index += 1;
         } else if (empty_plain_document and emit_document_start) {
             if (self.omit_redundant_document_start) {
-                try out.append(self.allocator, '\n');
+                try out.*.append(self.allocator, '\n');
             } else {
-                try out.appendSlice(self.allocator, " null");
-                try out.append(self.allocator, '\n');
+                try out.*.appendSlice(self.allocator, " null");
+                try out.*.append(self.allocator, '\n');
             }
             self.index += 1;
         } else {
@@ -383,29 +427,24 @@ pub fn emit(self: *State) Error![]u8 {
                 if (emit_document_start) {
                     const starts_own_line = self.topLevelEventStartsOwnLine(self.events[self.index]) or
                         canonicalTopLevelScalarStartsOwnLine(self, document_start);
-                    try out.append(self.allocator, if (starts_own_line) '\n' else ' ');
+                    try out.*.append(self.allocator, if (starts_own_line) '\n' else ' ');
                 }
                 try emitTopLevelNode(self, &out);
             }
-            try out.append(self.allocator, '\n');
+            try out.*.append(self.allocator, '\n');
         }
 
         if (self.index >= self.events.len or self.events[self.index] != .document_end) return ParseError.InvalidSyntax;
         const document_end = self.events[self.index].document_end;
         self.index += 1;
 
-        if (document_end.explicit or force_document_end) try out.appendSlice(self.allocator, "...\n");
+        if (document_end.explicit or force_document_end) try out.*.appendSlice(self.allocator, "...\n");
         previous_document_start_explicit = document_start.explicit;
         previous_document_empty = empty_plain_document;
     }
 
     try self.expectEvent(.stream_end);
     if (self.index != self.events.len) return ParseError.InvalidSyntax;
-    if (self.max_output_bytes) |max_output_bytes| {
-        if (out.items.len > max_output_bytes) return ParseError.Unsupported;
-    }
-
-    return out.toOwnedSlice(self.allocator);
 }
 
 fn validateYamlVersion(version: ?[]const u8) ParseError!void {
@@ -436,16 +475,16 @@ fn validateDocumentTagsDeclared(self: *const State, tag_directives: []const even
     return tag_emit.usesDeclaredTagDirective(document_events, tag_directives);
 }
 
-fn emitTopLevelGlobalTaggedScalarAfterDocumentStart(self: *State, out: *std.ArrayList(u8)) Error!void {
+fn emitTopLevelGlobalTaggedScalarAfterDocumentStart(self: *State, out: anytype) Error!void {
     const scalar = self.events[self.index].scalar;
     if (scalar.anchor) |anchor| {
         try validateAnchorName(anchor);
-        try out.append(self.allocator, ' ');
-        try out.append(self.allocator, '&');
-        try out.appendSlice(self.allocator, anchor);
+        try out.*.append(self.allocator, ' ');
+        try out.*.append(self.allocator, '&');
+        try out.*.appendSlice(self.allocator, anchor);
     }
     if (scalar.tag) |tag| {
-        try out.append(self.allocator, ' ');
+        try out.*.append(self.allocator, ' ');
         try appendEmittedTag(self.allocator, out, tag);
     }
 
@@ -459,7 +498,7 @@ fn emitTopLevelGlobalTaggedScalarAfterDocumentStart(self: *State, out: *std.Arra
         std.mem.indexOfScalar(u8, scalar_without_tag.value, '\n') == null and
         (scalar_without_tag.style != .plain or !plainScalarNeedsQuoting(scalar_without_tag.value)))
     {
-        try out.append(self.allocator, ' ');
+        try out.*.append(self.allocator, ' ');
         try appendEmittedScalarNodeIndented(self.allocator, out, scalar_without_tag, .{
             .content = 2,
             .indicator = 2,
@@ -468,7 +507,7 @@ fn emitTopLevelGlobalTaggedScalarAfterDocumentStart(self: *State, out: *std.Arra
         return;
     }
 
-    try out.append(self.allocator, '\n');
+    try out.*.append(self.allocator, '\n');
     try appendEmittedScalarNodeIndented(self.allocator, out, self.emittedScalar(scalar_without_tag), .{
         .content = 2,
         .indicator = 2,
@@ -495,7 +534,7 @@ fn shouldEmitEmptyDocument(self: *const State) bool {
     return emptyPlainDocumentHasExplicitEnd(self);
 }
 
-fn emitTopLevelNode(self: *State, out: *std.ArrayList(u8)) Error!void {
+fn emitTopLevelNode(self: *State, out: anytype) Error!void {
     if (self.index >= self.events.len) return ParseError.InvalidSyntax;
 
     switch (self.events[self.index]) {
@@ -520,7 +559,7 @@ fn emitTopLevelNode(self: *State, out: *std.ArrayList(u8)) Error!void {
             const style = self.emittedCollectionStyle(collection.style);
             const emit_as_flow = style == .flow and self.preserve_top_level_flow_mapping_style;
             if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-                try out.append(self.allocator, if (emit_as_flow) ' ' else '\n');
+                try out.*.append(self.allocator, if (emit_as_flow) ' ' else '\n');
             }
             if (emit_as_flow) {
                 try flow.emitFlowMapping(self, out);
@@ -534,7 +573,7 @@ fn emitTopLevelNode(self: *State, out: *std.ArrayList(u8)) Error!void {
             const style = self.emittedCollectionStyle(collection.style);
             const wrote_properties = try appendEmittedCollectionProperties(self.allocator, out, collection);
             if (wrote_properties) {
-                try out.append(self.allocator, switch (style) {
+                try out.*.append(self.allocator, switch (style) {
                     .block => '\n',
                     .flow => ' ',
                 });

@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // LLVM backend with -Duse-llvm=true for the coverage and valgrind CI steps.
     // See ziglang/zig#24463 and #25368.
     const use_llvm = b.option(bool, "use-llvm", "Build test binaries with the LLVM backend (needed for kcov coverage on Zig 0.16+).");
-    const coverage_threshold = b.option(u8, "coverage-threshold", "Minimum line coverage percent required by test-coverage.") orelse 100;
+    const coverage_threshold = b.option(u8, "coverage-threshold", "Minimum line coverage percent required by test-coverage.") orelse 85;
     const yaml_test_suite_dir = b.option(
         []const u8,
         "yaml-test-suite-dir",

@@ -12,7 +12,7 @@ const Error = common.Error;
 const ParseError = common.ParseError;
 const TagDirective = event_types.TagDirective;
 
-pub fn appendEmittedTag(allocator: std.mem.Allocator, out: *std.ArrayList(u8), tag: []const u8) Error!void {
+pub fn appendEmittedTag(allocator: std.mem.Allocator, out: anytype, tag: []const u8) Error!void {
     try validateEmittedTag(tag);
 
     if (std.mem.startsWith(u8, tag, "!")) {
@@ -22,23 +22,23 @@ pub fn appendEmittedTag(allocator: std.mem.Allocator, out: *std.ArrayList(u8), t
 
     const standard_prefix = "tag:yaml.org,2002:";
     if (std.mem.startsWith(u8, tag, standard_prefix) and tag.len > standard_prefix.len) {
-        try out.appendSlice(allocator, "!!");
+        try out.*.appendSlice(allocator, "!!");
         try appendPercentEncodedBareTag(allocator, out, tag[standard_prefix.len..]);
         return;
     }
 
-    try out.appendSlice(allocator, "!<");
+    try out.*.appendSlice(allocator, "!<");
     try appendPercentEncodedVerbatimTag(allocator, out, tag);
-    try out.append(allocator, '>');
+    try out.*.append(allocator, '>');
 }
 
-pub fn appendTagDirective(allocator: std.mem.Allocator, out: *std.ArrayList(u8), directive: TagDirective) Error!void {
+pub fn appendTagDirective(allocator: std.mem.Allocator, out: anytype, directive: TagDirective) Error!void {
     try validateTagDirective(directive);
-    try out.appendSlice(allocator, "%TAG ");
-    try out.appendSlice(allocator, directive.handle);
-    try out.append(allocator, ' ');
-    try out.appendSlice(allocator, directive.prefix);
-    try out.append(allocator, '\n');
+    try out.*.appendSlice(allocator, "%TAG ");
+    try out.*.appendSlice(allocator, directive.handle);
+    try out.*.append(allocator, ' ');
+    try out.*.appendSlice(allocator, directive.prefix);
+    try out.*.append(allocator, '\n');
 }
 
 pub fn validateTagDirectives(directives: []const TagDirective) ParseError!void {
@@ -186,12 +186,12 @@ fn hasUriSchemePrefix(tag: []const u8) bool {
 
 fn appendPercentEncodedBareTag(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     tag: []const u8,
 ) std.mem.Allocator.Error!void {
     for (tag) |byte| {
         if (isBareTagChar(byte)) {
-            try out.append(allocator, byte);
+            try out.*.append(allocator, byte);
         } else {
             try appendPercentEncodedByte(allocator, out, byte);
         }
@@ -200,12 +200,12 @@ fn appendPercentEncodedBareTag(
 
 fn appendPercentEncodedVerbatimTag(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     tag: []const u8,
 ) std.mem.Allocator.Error!void {
     for (tag) |byte| {
         if (isTagUriChar(byte)) {
-            try out.append(allocator, byte);
+            try out.*.append(allocator, byte);
         } else {
             try appendPercentEncodedByte(allocator, out, byte);
         }
@@ -222,16 +222,16 @@ fn isBareTagChar(byte: u8) bool {
 
 fn appendPercentEncodedByte(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     byte: u8,
 ) std.mem.Allocator.Error!void {
-    try out.append(allocator, '%');
+    try out.*.append(allocator, '%');
     try appendFixedHex(allocator, out, byte, 2);
 }
 
 pub fn appendFixedHex(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     value: u21,
     comptime width: usize,
 ) std.mem.Allocator.Error!void {
@@ -240,7 +240,7 @@ pub fn appendFixedHex(
     var shift: usize = (width - 1) * 4;
     while (true) {
         const digit: usize = @intCast((widened >> @intCast(shift)) & 0x0f);
-        try out.append(allocator, hex[digit]);
+        try out.*.append(allocator, hex[digit]);
         if (shift == 0) break;
         shift -= 4;
     }

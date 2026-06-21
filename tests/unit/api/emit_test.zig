@@ -1448,6 +1448,30 @@ test "emitEventsToWriterWithOptions honors output limits before writing" {
     try std.testing.expectEqual(@as(usize, 0), writer.buffered().len);
 }
 
+test "emitEventsWithOptions checks output limits before growing buffer" {
+    const large_scalar =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ++
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const events = [_]yaml.Event{
+        .stream_start,
+        .{ .document_start = .{} },
+        .{ .scalar = .{ .value = large_scalar } },
+        .{ .document_end = .{} },
+        .stream_end,
+    };
+
+    var fixed_buffer: [64]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&fixed_buffer);
+
+    try std.testing.expectError(yaml.ParseError.Unsupported, yaml.emitEventsWithOptions(
+        fixed.allocator(),
+        &events,
+        .{ .max_output_bytes = 8 },
+    ));
+}
+
 test "emitEventsToWriter frees temporary output when writer fails" {
     const events = [_]yaml.Event{
         .stream_start,

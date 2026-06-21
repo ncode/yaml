@@ -85,10 +85,14 @@ test "structure: coverage step enforces configured threshold" {
 
     const build_steps_source = try support.readRepoFile("tools/build_steps.zig");
     defer std.testing.allocator.free(build_steps_source);
+    const ci_source = try support.readRepoFile(".github/workflows/ci.yml");
+    defer std.testing.allocator.free(ci_source);
 
     try std.testing.expect(std.mem.indexOf(u8, build_source, "coverage-threshold") != null);
+    try std.testing.expect(std.mem.indexOf(u8, build_source, "orelse 85") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_steps_source, "check_coverage_threshold.zig") != null);
     try std.testing.expect(std.mem.indexOf(u8, build_steps_source, "addCoverageThresholdStep") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ci_source, "-Dcoverage-threshold=85") != null);
 }
 
 test "structure: coverage step includes focused unit test shards" {

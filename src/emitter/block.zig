@@ -32,13 +32,13 @@ pub const MappingValueLayout = enum {
     after_explicit_key,
 };
 
-pub fn emitBlockSequence(self: *State, out: *std.ArrayList(u8)) Error!void {
+pub fn emitBlockSequence(self: *State, out: anytype) Error!void {
     try emitBlockSequenceIndented(self, out, 0, null);
 }
 
 pub fn emitBlockSequenceIndented(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     indent: usize,
     first_prefix: ?[]const u8,
 ) Error!void {
@@ -49,13 +49,13 @@ pub fn emitBlockSequenceIndented(
     while (self.index < self.events.len and self.events[self.index] != .sequence_end) {
         if (first_item) {
             if (first_prefix) |prefix| {
-                try out.appendSlice(self.allocator, prefix);
+                try out.*.appendSlice(self.allocator, prefix);
             } else {
                 try appendIndent(self.allocator, out, indent);
             }
             first_item = false;
         } else {
-            try out.append(self.allocator, '\n');
+            try out.*.append(self.allocator, '\n');
             try appendIndent(self.allocator, out, indent);
         }
 
@@ -65,13 +65,13 @@ pub fn emitBlockSequenceIndented(
                 self.index += 1;
 
                 if (isPlainEmptyScalar(item)) {
-                    try out.append(self.allocator, '-');
+                    try out.*.append(self.allocator, '-');
                     if (item.anchor != null or item.tag != null) {
-                        try out.append(self.allocator, ' ');
+                        try out.*.append(self.allocator, ' ');
                         _ = try appendEmittedScalarProperties(self.allocator, out, item);
                     }
                 } else {
-                    try out.appendSlice(self.allocator, "- ");
+                    try out.*.appendSlice(self.allocator, "- ");
                     try appendEmittedScalarNodeIndented(self.allocator, out, self.emittedScalar(item), .{
                         .content = indent + 2,
                         .indicator = 2,
@@ -82,7 +82,7 @@ pub fn emitBlockSequenceIndented(
             },
             .alias => |alias| {
                 self.index += 1;
-                try out.appendSlice(self.allocator, "- ");
+                try out.*.appendSlice(self.allocator, "- ");
                 try appendEmittedAlias(self.allocator, out, alias);
             },
             .mapping_start => |collection| {
@@ -92,15 +92,15 @@ pub fn emitBlockSequenceIndented(
                 } else if (collectionHasProperties(collection)) {
                     switch (self.emittedCollectionStyle(collection.style)) {
                         .block => {
-                            try out.appendSlice(self.allocator, "- ");
+                            try out.*.appendSlice(self.allocator, "- ");
                             _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                            try out.append(self.allocator, '\n');
+                            try out.*.append(self.allocator, '\n');
                             try emitBlockMappingIndented(self, out, indent + 2);
                         },
                         .flow => {
-                            try out.appendSlice(self.allocator, "- ");
+                            try out.*.appendSlice(self.allocator, "- ");
                             _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                            try out.append(self.allocator, ' ');
+                            try out.*.append(self.allocator, ' ');
                             try flow.emitFlowMapping(self, out);
                         },
                     }
@@ -109,7 +109,7 @@ pub fn emitBlockSequenceIndented(
                         .block => try emitCompactBlockMappingSequenceItem(self, out, indent),
                         .flow => {
                             if (self.preserve_block_sequence_flow_mapping_style) {
-                                try out.appendSlice(self.allocator, "- ");
+                                try out.*.appendSlice(self.allocator, "- ");
                                 try flow.emitFlowMapping(self, out);
                             } else {
                                 try emitCompactBlockMappingSequenceItem(self, out, indent);
@@ -125,18 +125,18 @@ pub fn emitBlockSequenceIndented(
                 } else switch (self.emittedCollectionStyle(collection.style)) {
                     .block => {
                         if (collectionHasProperties(collection)) {
-                            try out.appendSlice(self.allocator, "- ");
+                            try out.*.appendSlice(self.allocator, "- ");
                             _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                            try out.append(self.allocator, '\n');
+                            try out.*.append(self.allocator, '\n');
                             try emitBlockSequenceIndented(self, out, indent + 2, null);
                         } else {
                             try emitBlockSequenceIndented(self, out, indent + 2, "- ");
                         }
                     },
                     .flow => {
-                        try out.appendSlice(self.allocator, "- ");
+                        try out.*.appendSlice(self.allocator, "- ");
                         if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-                            try out.append(self.allocator, ' ');
+                            try out.*.append(self.allocator, ' ');
                         }
                         try flow.emitFlowSequence(self, out);
                     },
@@ -151,21 +151,21 @@ pub fn emitBlockSequenceIndented(
     self.index += 1;
 }
 
-pub fn emitBlockMapping(self: *State, out: *std.ArrayList(u8)) Error!void {
+pub fn emitBlockMapping(self: *State, out: anytype) Error!void {
     try emitBlockMappingIndented(self, out, 0);
 }
 
-pub fn emitBlockMappingIndented(self: *State, out: *std.ArrayList(u8), indent: usize) Error!void {
+pub fn emitBlockMappingIndented(self: *State, out: anytype, indent: usize) Error!void {
     try emitBlockMappingEntries(self, out, indent, null, false);
 }
 
-fn emitCompactBlockMappingSequenceItem(self: *State, out: *std.ArrayList(u8), indent: usize) Error!void {
+fn emitCompactBlockMappingSequenceItem(self: *State, out: anytype, indent: usize) Error!void {
     try emitBlockMappingEntries(self, out, indent + 2, "- ", !self.preserve_collection_style);
 }
 
 pub fn emitBlockMappingEntries(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     indent: usize,
     first_prefix: ?[]const u8,
     canonicalize_quoted_keys: bool,
@@ -177,13 +177,13 @@ pub fn emitBlockMappingEntries(
     while (self.index < self.events.len and self.events[self.index] != .mapping_end) {
         if (first_pair) {
             if (first_prefix) |prefix| {
-                try out.appendSlice(self.allocator, prefix);
+                try out.*.appendSlice(self.allocator, prefix);
             } else {
                 try appendIndent(self.allocator, out, indent);
             }
             first_pair = false;
         } else {
-            try out.append(self.allocator, '\n');
+            try out.*.append(self.allocator, '\n');
             try appendIndent(self.allocator, out, indent);
         }
 
@@ -194,7 +194,7 @@ pub fn emitBlockMappingEntries(
                 switch (key.style) {
                     .plain, .single_quoted, .double_quoted => {
                         if (std.mem.indexOfScalar(u8, key.value, '\n') != null) {
-                            try out.appendSlice(self.allocator, "? ");
+                            try out.*.appendSlice(self.allocator, "? ");
                             try appendEmittedScalarNodeIndented(self.allocator, out, self.emittedScalar(key), .{
                                 .content = indent + 2,
                                 .indicator = 2,
@@ -207,7 +207,7 @@ pub fn emitBlockMappingEntries(
                         }
                     },
                     .literal, .folded => {
-                        try out.appendSlice(self.allocator, "? ");
+                        try out.*.appendSlice(self.allocator, "? ");
                         try appendEmittedScalarNodeIndented(self.allocator, out, key, .{
                             .content = indent + 2,
                             .indicator = 2,
@@ -219,7 +219,7 @@ pub fn emitBlockMappingEntries(
             .alias => |alias| {
                 self.index += 1;
                 try appendEmittedAlias(self.allocator, out, alias);
-                try out.append(self.allocator, ' ');
+                try out.*.append(self.allocator, ' ');
                 try emitBlockMappingValue(self, out, indent, .after_scalar_key);
             },
             .sequence_start => |collection| {
@@ -228,9 +228,9 @@ pub fn emitBlockMappingEntries(
                     switch (self.emittedCollectionStyle(collection.style)) {
                         .block => {
                             if (collectionHasProperties(collection)) {
-                                try out.appendSlice(self.allocator, "? ");
+                                try out.*.appendSlice(self.allocator, "? ");
                                 _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                                try out.append(self.allocator, '\n');
+                                try out.*.append(self.allocator, '\n');
                                 const sequence_indent = if (self.preserve_collection_style) indent + 2 else indent;
                                 try emitBlockSequenceIndented(self, out, sequence_indent, null);
                             } else {
@@ -238,9 +238,9 @@ pub fn emitBlockMappingEntries(
                             }
                         },
                         .flow => {
-                            try out.appendSlice(self.allocator, "? ");
+                            try out.*.appendSlice(self.allocator, "? ");
                             if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-                                try out.append(self.allocator, ' ');
+                                try out.*.append(self.allocator, ' ');
                             }
                             try flow.emitFlowSequence(self, out);
                         },
@@ -254,9 +254,9 @@ pub fn emitBlockMappingEntries(
                     switch (self.emittedCollectionStyle(collection.style)) {
                         .block => {
                             if (collectionHasProperties(collection)) {
-                                try out.appendSlice(self.allocator, "? ");
+                                try out.*.appendSlice(self.allocator, "? ");
                                 _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                                try out.append(self.allocator, '\n');
+                                try out.*.append(self.allocator, '\n');
                                 try emitBlockMappingIndented(self, out, indent + 2);
                             } else if (try emitCompactEmptySequenceMappingKey(self, out)) {
                                 // The compact key was emitted on this line.
@@ -265,9 +265,9 @@ pub fn emitBlockMappingEntries(
                             }
                         },
                         .flow => {
-                            try out.appendSlice(self.allocator, "? ");
+                            try out.*.appendSlice(self.allocator, "? ");
                             if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-                                try out.append(self.allocator, ' ');
+                                try out.*.append(self.allocator, ' ');
                             }
                             try flow.emitFlowMapping(self, out);
                         },
@@ -283,7 +283,7 @@ pub fn emitBlockMappingEntries(
     self.index += 1;
 }
 
-fn emitCompactEmptySequenceMappingKey(self: *State, out: *std.ArrayList(u8)) Error!bool {
+fn emitCompactEmptySequenceMappingKey(self: *State, out: anytype) Error!bool {
     if (self.index + 3 >= self.events.len) return false;
     if (self.events[self.index] != .sequence_start) return false;
     const sequence = self.events[self.index].sequence_start;
@@ -294,7 +294,7 @@ fn emitCompactEmptySequenceMappingKey(self: *State, out: *std.ArrayList(u8)) Err
     if (!isNonEmptyInlineScalar(value)) return false;
     if (self.events[self.index + 3] != .mapping_end) return false;
 
-    try out.appendSlice(self.allocator, "? []: ");
+    try out.*.appendSlice(self.allocator, "? []: ");
     try appendEmittedScalarNodeIndented(self.allocator, out, self.emittedScalar(value), .{
         .content = 2,
         .indicator = 2,
@@ -305,7 +305,7 @@ fn emitCompactEmptySequenceMappingKey(self: *State, out: *std.ArrayList(u8)) Err
 
 pub fn emitBlockMappingValue(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     indent: usize,
     layout: MappingValueLayout,
 ) Error!void {
@@ -315,17 +315,17 @@ pub fn emitBlockMappingValue(
         .scalar => |value| {
             self.index += 1;
             if (layout == .after_explicit_key) {
-                try out.append(self.allocator, '\n');
+                try out.*.append(self.allocator, '\n');
                 try appendIndent(self.allocator, out, indent);
             }
-            try out.append(self.allocator, ':');
+            try out.*.append(self.allocator, ':');
             if (isPlainEmptyScalar(value)) {
                 if (value.anchor != null or value.tag != null) {
-                    try out.append(self.allocator, ' ');
+                    try out.*.append(self.allocator, ' ');
                     _ = try appendEmittedScalarProperties(self.allocator, out, value);
                 }
             } else {
-                try out.append(self.allocator, ' ');
+                try out.*.append(self.allocator, ' ');
                 try appendEmittedScalarNodeIndented(self.allocator, out, self.emittedScalar(value), .{
                     .content = indent + 2,
                     .indicator = 2,
@@ -344,19 +344,19 @@ pub fn emitBlockMappingValue(
                 .block => {
                     if (collectionHasProperties(collection)) {
                         try emitMappingValueIndicator(self, out, indent, layout);
-                        try out.append(self.allocator, ' ');
+                        try out.*.append(self.allocator, ' ');
                         _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                        try out.append(self.allocator, '\n');
+                        try out.*.append(self.allocator, '\n');
                         const sequence_indent = if (self.preserve_collection_style) indent + 2 else indent;
                         try emitBlockSequenceIndented(self, out, sequence_indent, null);
                     } else switch (layout) {
                         .after_scalar_key => {
-                            try out.append(self.allocator, ':');
-                            try out.append(self.allocator, '\n');
+                            try out.*.append(self.allocator, ':');
+                            try out.*.append(self.allocator, '\n');
                             try emitBlockSequenceIndented(self, out, indent, null);
                         },
                         .after_explicit_key => {
-                            try out.append(self.allocator, '\n');
+                            try out.*.append(self.allocator, '\n');
                             try appendIndent(self.allocator, out, indent);
                             try emitBlockSequenceIndented(self, out, indent + 2, ": ");
                         },
@@ -364,9 +364,9 @@ pub fn emitBlockMappingValue(
                 },
                 .flow => {
                     try emitMappingValueIndicator(self, out, indent, layout);
-                    try out.append(self.allocator, ' ');
+                    try out.*.append(self.allocator, ' ');
                     if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-                        try out.append(self.allocator, ' ');
+                        try out.*.append(self.allocator, ' ');
                     }
                     try flow.emitFlowSequence(self, out);
                 },
@@ -379,28 +379,28 @@ pub fn emitBlockMappingValue(
                 switch (self.emittedCollectionStyle(collection.style)) {
                     .block => {
                         try emitMappingValueIndicator(self, out, indent, layout);
-                        try out.append(self.allocator, ' ');
+                        try out.*.append(self.allocator, ' ');
                         _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                        try out.append(self.allocator, '\n');
+                        try out.*.append(self.allocator, '\n');
                         try emitBlockMappingIndented(self, out, indent + 2);
                     },
                     .flow => {
                         try emitMappingValueIndicator(self, out, indent, layout);
-                        try out.append(self.allocator, ' ');
+                        try out.*.append(self.allocator, ' ');
                         _ = try appendEmittedCollectionProperties(self.allocator, out, collection);
-                        try out.append(self.allocator, ' ');
+                        try out.*.append(self.allocator, ' ');
                         try flow.emitFlowMapping(self, out);
                     },
                 }
             } else {
                 switch (layout) {
                     .after_scalar_key => {
-                        try out.append(self.allocator, ':');
-                        try out.append(self.allocator, '\n');
+                        try out.*.append(self.allocator, ':');
+                        try out.*.append(self.allocator, '\n');
                         try emitBlockMappingIndented(self, out, indent + 2);
                     },
                     .after_explicit_key => {
-                        try out.append(self.allocator, '\n');
+                        try out.*.append(self.allocator, '\n');
                         try appendIndent(self.allocator, out, indent);
                         try emitBlockMappingEntries(self, out, indent + 2, ": ", false);
                     },
@@ -410,10 +410,10 @@ pub fn emitBlockMappingValue(
         .alias => |alias| {
             self.index += 1;
             if (layout == .after_explicit_key) {
-                try out.append(self.allocator, '\n');
+                try out.*.append(self.allocator, '\n');
                 try appendIndent(self.allocator, out, indent);
             }
-            try out.appendSlice(self.allocator, ": ");
+            try out.*.appendSlice(self.allocator, ": ");
             try appendEmittedAlias(self.allocator, out, alias);
         },
         else => return ParseError.Unsupported,
@@ -422,15 +422,15 @@ pub fn emitBlockMappingValue(
 
 fn emitMappingValueIndicator(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     indent: usize,
     layout: MappingValueLayout,
 ) std.mem.Allocator.Error!void {
     if (layout == .after_explicit_key) {
-        try out.append(self.allocator, '\n');
+        try out.*.append(self.allocator, '\n');
         try appendIndent(self.allocator, out, indent);
     }
-    try out.append(self.allocator, ':');
+    try out.*.append(self.allocator, ':');
 }
 
 test "emitter block value: sequence properties preserve nested indent" {
@@ -457,7 +457,7 @@ test "emitter block value: sequence properties preserve nested indent" {
 
 fn emitEmptySequenceMappingValue(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     collection: CollectionStart,
     indent: usize,
     layout: MappingValueLayout,
@@ -466,18 +466,18 @@ fn emitEmptySequenceMappingValue(
     if (self.events[self.index] != .sequence_end) return false;
 
     try emitMappingValueIndicator(self, out, indent, layout);
-    try out.append(self.allocator, ' ');
+    try out.*.append(self.allocator, ' ');
     if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-        try out.append(self.allocator, ' ');
+        try out.*.append(self.allocator, ' ');
     }
-    try out.appendSlice(self.allocator, "[]");
+    try out.*.appendSlice(self.allocator, "[]");
     self.index += 1;
     return true;
 }
 
 fn emitEmptyMappingValue(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     collection: CollectionStart,
     indent: usize,
     layout: MappingValueLayout,
@@ -486,11 +486,11 @@ fn emitEmptyMappingValue(
     if (self.events[self.index] != .mapping_end) return false;
 
     try emitMappingValueIndicator(self, out, indent, layout);
-    try out.append(self.allocator, ' ');
+    try out.*.append(self.allocator, ' ');
     if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-        try out.append(self.allocator, ' ');
+        try out.*.append(self.allocator, ' ');
     }
-    try out.appendSlice(self.allocator, "{}");
+    try out.*.appendSlice(self.allocator, "{}");
     self.index += 1;
     return true;
 }
