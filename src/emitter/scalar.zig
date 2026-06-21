@@ -32,7 +32,7 @@ pub const EmittedBlockScalarIndent = struct {
     indent_indicator_for_newline_only: bool = false,
 };
 
-pub fn appendEmittedScalarNode(allocator: std.mem.Allocator, out: *std.ArrayList(u8), scalar: Scalar) Error!void {
+pub fn appendEmittedScalarNode(allocator: std.mem.Allocator, out: anytype, scalar: Scalar) Error!void {
     try appendEmittedScalarNodeIndented(allocator, out, scalar, .{
         .content = 2,
         .indicator = 2,
@@ -41,21 +41,21 @@ pub fn appendEmittedScalarNode(allocator: std.mem.Allocator, out: *std.ArrayList
 
 pub fn appendEmittedScalarNodeIndented(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     scalar: Scalar,
     block_indent: EmittedBlockScalarIndent,
 ) Error!void {
     if (try appendEmittedScalarProperties(allocator, out, scalar)) {
-        try out.append(allocator, ' ');
+        try out.*.append(allocator, ' ');
     }
     try appendEmittedScalarIndented(allocator, out, scalar, block_indent);
 }
 
-pub fn appendEmittedMappingKey(allocator: std.mem.Allocator, out: *std.ArrayList(u8), scalar: Scalar) Error!void {
+pub fn appendEmittedMappingKey(allocator: std.mem.Allocator, out: anytype, scalar: Scalar) Error!void {
     if (isPlainEmptyScalar(scalar) and scalar.anchor == null and scalar.tag == null) return;
 
     if (try appendEmittedScalarProperties(allocator, out, scalar)) {
-        try out.append(allocator, ' ');
+        try out.*.append(allocator, ' ');
     }
     if (isPlainEmptyScalar(scalar)) return;
 
@@ -95,7 +95,7 @@ pub fn isNonEmptyInlineEvent(event: Event) bool {
 
 fn appendEmittedScalarIndented(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     scalar: Scalar,
     block_indent: EmittedBlockScalarIndent,
 ) Error!void {
@@ -115,7 +115,7 @@ fn appendEmittedScalarIndented(
     switch (style) {
         .plain => {
             if (scalar.value.len == 0) {
-                try out.appendSlice(allocator, "''");
+                try out.*.appendSlice(allocator, "''");
             } else if (plainScalarNeedsQuoting(scalar.value)) {
                 if (std.mem.indexOfScalar(u8, scalar.value, '\n') != null) {
                     try appendSingleQuotedScalarIndented(allocator, out, scalar.value, block_indent.content);
@@ -125,7 +125,7 @@ fn appendEmittedScalarIndented(
             } else if (std.mem.indexOfScalar(u8, scalar.value, '\n') != null) {
                 try appendPlainScalarWithLineBreaks(allocator, out, scalar.value, block_indent.plain_continuation);
             } else {
-                try out.appendSlice(allocator, scalar.value);
+                try out.*.appendSlice(allocator, scalar.value);
             }
         },
         .single_quoted => try appendSingleQuotedScalarIndented(allocator, out, scalar.value, block_indent.content),
@@ -191,11 +191,11 @@ pub fn plainBlockMappingKeyNeedsQuoting(value: []const u8) bool {
 
 pub fn appendEmittedPlainBlockMappingKey(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     value: []const u8,
 ) std.mem.Allocator.Error!void {
     if (value.len == 0) {
-        try out.appendSlice(allocator, "''");
+        try out.*.appendSlice(allocator, "''");
     } else if (plainBlockMappingKeyNeedsQuoting(value)) {
         if (std.mem.indexOfScalar(u8, value, '\n') != null) {
             try appendSingleQuotedScalarIndented(allocator, out, value, 2);
@@ -203,13 +203,13 @@ pub fn appendEmittedPlainBlockMappingKey(
             try appendSingleQuotedScalar(allocator, out, value);
         }
     } else {
-        try out.appendSlice(allocator, value);
+        try out.*.appendSlice(allocator, value);
     }
 }
 
 pub fn appendPlainScalarWithLineBreaks(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     value: []const u8,
     continuation_indent: usize,
 ) std.mem.Allocator.Error!void {
@@ -217,18 +217,18 @@ pub fn appendPlainScalarWithLineBreaks(
     var first = true;
     while (lines.next()) |line| {
         if (!first) {
-            try out.appendSlice(allocator, "\n\n");
+            try out.*.appendSlice(allocator, "\n\n");
             if (line.len != 0) try appendIndent(allocator, out, continuation_indent);
         }
         first = false;
-        try out.appendSlice(allocator, line);
+        try out.*.appendSlice(allocator, line);
     }
 }
 
-pub fn appendIndent(allocator: std.mem.Allocator, out: *std.ArrayList(u8), indent: usize) std.mem.Allocator.Error!void {
+pub fn appendIndent(allocator: std.mem.Allocator, out: anytype, indent: usize) std.mem.Allocator.Error!void {
     var count = indent;
     while (count > 0) : (count -= 1) {
-        try out.append(allocator, ' ');
+        try out.*.append(allocator, ' ');
     }
 }
 
@@ -325,7 +325,7 @@ pub fn blockScalarHasTabStartedLine(value: []const u8) bool {
 
 pub fn appendLiteral(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     value: []const u8,
     indent: EmittedBlockScalarIndent,
 ) Error!void {
@@ -334,24 +334,24 @@ pub fn appendLiteral(
 
 pub fn appendFolded(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     value: []const u8,
     indent: EmittedBlockScalarIndent,
 ) Error!void {
-    try out.append(allocator, '>');
+    try out.*.append(allocator, '>');
     if (value.len == 0) return;
     if (blockScalarNeedsIndentIndicatorWithOptions(value, indent)) {
         if (indent.indicator == 0 or indent.indicator > 9) return ParseError.Unsupported;
         const digit: u8 = @intCast(indent.indicator);
-        try out.append(allocator, '0' + digit);
+        try out.*.append(allocator, '0' + digit);
     }
     if (value[value.len - 1] != '\n') {
-        try out.append(allocator, '-');
+        try out.*.append(allocator, '-');
     } else if (blockScalarUsesKeepChomping(value)) {
-        try out.append(allocator, '+');
+        try out.*.append(allocator, '+');
     }
 
-    try out.append(allocator, '\n');
+    try out.*.append(allocator, '\n');
 
     var line_start: usize = 0;
     while (line_start < value.len) {
@@ -360,7 +360,7 @@ pub fn appendFolded(
 
         if (line.len != 0) {
             try appendIndent(allocator, out, indent.content);
-            try out.appendSlice(allocator, line);
+            try out.*.appendSlice(allocator, line);
         }
 
         if (line_end == value.len) break;
@@ -374,7 +374,7 @@ pub fn appendFolded(
             const next_line = value[newline_end..next_line_end];
             break :blk if (line.len == 0 or lineStartsWhitespace(line) or lineStartsWhitespace(next_line)) newline_count else newline_count + 1;
         };
-        for (0..output_newline_count) |_| try out.append(allocator, '\n');
+        for (0..output_newline_count) |_| try out.*.append(allocator, '\n');
 
         line_start = newline_end;
     }
@@ -382,25 +382,25 @@ pub fn appendFolded(
 
 fn appendBlockScalar(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     indicator: u8,
     value: []const u8,
     indent: EmittedBlockScalarIndent,
 ) Error!void {
-    try out.append(allocator, indicator);
+    try out.*.append(allocator, indicator);
     if (value.len == 0) return;
     if (blockScalarNeedsIndentIndicatorWithOptions(value, indent)) {
         if (indent.indicator == 0 or indent.indicator > 9) return ParseError.Unsupported;
         const digit: u8 = @intCast(indent.indicator);
-        try out.append(allocator, '0' + digit);
+        try out.*.append(allocator, '0' + digit);
     }
     if (value[value.len - 1] != '\n') {
-        try out.append(allocator, '-');
+        try out.*.append(allocator, '-');
     } else if (blockScalarUsesKeepChomping(value)) {
-        try out.append(allocator, '+');
+        try out.*.append(allocator, '+');
     }
 
-    try out.append(allocator, '\n');
+    try out.*.append(allocator, '\n');
 
     var line_start: usize = 0;
     while (line_start < value.len) {
@@ -409,12 +409,12 @@ fn appendBlockScalar(
 
         if (line.len != 0) {
             try appendIndent(allocator, out, indent.content);
-            try out.appendSlice(allocator, line);
+            try out.*.appendSlice(allocator, line);
         }
 
         if (line_end == value.len) break;
         line_start = line_end + 1;
-        if (line_start < value.len) try out.append(allocator, '\n');
+        if (line_start < value.len) try out.*.append(allocator, '\n');
     }
 }
 
@@ -478,18 +478,18 @@ pub fn collectionHasProperties(collection: CollectionStart) bool {
     return collection.anchor != null or collection.tag != null;
 }
 
-pub fn appendEmittedScalarProperties(allocator: std.mem.Allocator, out: *std.ArrayList(u8), scalar: Scalar) Error!bool {
+pub fn appendEmittedScalarProperties(allocator: std.mem.Allocator, out: anytype, scalar: Scalar) Error!bool {
     var wrote_property = false;
 
     if (scalar.anchor) |anchor| {
         try validateAnchorName(anchor);
-        try out.append(allocator, '&');
-        try out.appendSlice(allocator, anchor);
+        try out.*.append(allocator, '&');
+        try out.*.appendSlice(allocator, anchor);
         wrote_property = true;
     }
 
     if (scalar.tag) |tag| {
-        if (wrote_property) try out.append(allocator, ' ');
+        if (wrote_property) try out.*.append(allocator, ' ');
         try appendEmittedTag(allocator, out, tag);
         wrote_property = true;
     }
@@ -499,20 +499,20 @@ pub fn appendEmittedScalarProperties(allocator: std.mem.Allocator, out: *std.Arr
 
 pub fn appendEmittedCollectionProperties(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     collection: CollectionStart,
 ) Error!bool {
     var wrote_property = false;
 
     if (collection.anchor) |anchor| {
         try validateAnchorName(anchor);
-        try out.append(allocator, '&');
-        try out.appendSlice(allocator, anchor);
+        try out.*.append(allocator, '&');
+        try out.*.appendSlice(allocator, anchor);
         wrote_property = true;
     }
 
     if (collection.tag) |tag| {
-        if (wrote_property) try out.append(allocator, ' ');
+        if (wrote_property) try out.*.append(allocator, ' ');
         try appendEmittedTag(allocator, out, tag);
         wrote_property = true;
     }
@@ -520,30 +520,30 @@ pub fn appendEmittedCollectionProperties(
     return wrote_property;
 }
 
-pub fn appendEmittedAlias(allocator: std.mem.Allocator, out: *std.ArrayList(u8), alias: []const u8) Error!void {
+pub fn appendEmittedAlias(allocator: std.mem.Allocator, out: anytype, alias: []const u8) Error!void {
     try validateAnchorName(alias);
-    try out.append(allocator, '*');
-    try out.appendSlice(allocator, alias);
+    try out.*.append(allocator, '*');
+    try out.*.appendSlice(allocator, alias);
 }
 
-pub fn appendSingleQuotedScalar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: []const u8) std.mem.Allocator.Error!void {
-    try out.append(allocator, '\'');
+pub fn appendSingleQuotedScalar(allocator: std.mem.Allocator, out: anytype, value: []const u8) std.mem.Allocator.Error!void {
+    try out.*.append(allocator, '\'');
     try appendSingleQuotedScalarContent(allocator, out, value);
-    try out.append(allocator, '\'');
+    try out.*.append(allocator, '\'');
 }
 
 pub fn appendSingleQuotedScalarIndented(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     value: []const u8,
     indent: usize,
 ) std.mem.Allocator.Error!void {
     if (isAllNewlines(value)) {
-        try out.append(allocator, '\'');
-        try out.append(allocator, '\n');
-        try out.appendSlice(allocator, value);
+        try out.*.append(allocator, '\'');
+        try out.*.append(allocator, '\n');
+        try out.*.appendSlice(allocator, value);
         try appendIndent(allocator, out, indent);
-        try out.append(allocator, '\'');
+        try out.*.append(allocator, '\'');
     } else if (std.mem.indexOfScalar(u8, value, '\n') != null) {
         try appendSingleQuotedScalarWithLineBreaks(allocator, out, value, indent);
     } else {
@@ -551,34 +551,34 @@ pub fn appendSingleQuotedScalarIndented(
     }
 }
 
-pub fn appendDoubleQuotedScalar(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: []const u8) Error!void {
-    try out.append(allocator, '"');
+pub fn appendDoubleQuotedScalar(allocator: std.mem.Allocator, out: anytype, value: []const u8) Error!void {
+    try out.*.append(allocator, '"');
     var index: usize = 0;
     while (index < value.len) {
         const byte = value[index];
         switch (byte) {
             '"' => {
-                try out.appendSlice(allocator, "\\\"");
+                try out.*.appendSlice(allocator, "\\\"");
                 index += 1;
             },
             '\\' => {
-                try out.appendSlice(allocator, "\\\\");
+                try out.*.appendSlice(allocator, "\\\\");
                 index += 1;
             },
             0x08 => {
-                try out.appendSlice(allocator, "\\b");
+                try out.*.appendSlice(allocator, "\\b");
                 index += 1;
             },
             '\t' => {
-                try out.appendSlice(allocator, "\\t");
+                try out.*.appendSlice(allocator, "\\t");
                 index += 1;
             },
             '\n' => {
-                try out.appendSlice(allocator, "\\n");
+                try out.*.appendSlice(allocator, "\\n");
                 index += 1;
             },
             '\r' => {
-                try out.appendSlice(allocator, "\\r");
+                try out.*.appendSlice(allocator, "\\r");
                 index += 1;
             },
             0x00...0x07, 0x0b, 0x0c, 0x0e...0x1f => {
@@ -593,7 +593,7 @@ pub fn appendDoubleQuotedScalar(allocator: std.mem.Allocator, out: *std.ArrayLis
                 if (codepoint == 0xfeff or codepoint > 0x7e) {
                     try appendCodepointEscape(allocator, out, codepoint);
                 } else if (tag_emit.isYamlAllowedCodepoint(codepoint)) {
-                    try out.appendSlice(allocator, value[index .. index + len]);
+                    try out.*.appendSlice(allocator, value[index .. index + len]);
                 } else {
                     try appendCodepointEscape(allocator, out, codepoint);
                 }
@@ -601,45 +601,45 @@ pub fn appendDoubleQuotedScalar(allocator: std.mem.Allocator, out: *std.ArrayLis
             },
         }
     }
-    try out.append(allocator, '"');
+    try out.*.append(allocator, '"');
 }
 
-fn appendSingleQuotedScalarContent(allocator: std.mem.Allocator, out: *std.ArrayList(u8), value: []const u8) std.mem.Allocator.Error!void {
+fn appendSingleQuotedScalarContent(allocator: std.mem.Allocator, out: anytype, value: []const u8) std.mem.Allocator.Error!void {
     for (value) |byte| {
-        if (byte == '\'') try out.append(allocator, '\'');
-        try out.append(allocator, byte);
+        if (byte == '\'') try out.*.append(allocator, '\'');
+        try out.*.append(allocator, byte);
     }
 }
 
 fn appendSingleQuotedScalarWithLineBreaks(
     allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
+    out: anytype,
     value: []const u8,
     continuation_indent: usize,
 ) std.mem.Allocator.Error!void {
-    try out.append(allocator, '\'');
+    try out.*.append(allocator, '\'');
     var lines = std.mem.splitScalar(u8, value, '\n');
     var first = true;
     while (lines.next()) |line| {
         if (!first) {
-            try out.appendSlice(allocator, "\n\n");
+            try out.*.appendSlice(allocator, "\n\n");
             if (line.len != 0) try appendIndent(allocator, out, continuation_indent);
         }
         first = false;
         try appendSingleQuotedScalarContent(allocator, out, line);
     }
-    try out.append(allocator, '\'');
+    try out.*.append(allocator, '\'');
 }
 
-fn appendCodepointEscape(allocator: std.mem.Allocator, out: *std.ArrayList(u8), codepoint: u21) std.mem.Allocator.Error!void {
+fn appendCodepointEscape(allocator: std.mem.Allocator, out: anytype, codepoint: u21) std.mem.Allocator.Error!void {
     if (codepoint <= 0xff) {
-        try out.appendSlice(allocator, "\\x");
+        try out.*.appendSlice(allocator, "\\x");
         try tag_emit.appendFixedHex(allocator, out, codepoint, 2);
     } else if (codepoint <= 0xffff) {
-        try out.appendSlice(allocator, "\\u");
+        try out.*.appendSlice(allocator, "\\u");
         try tag_emit.appendFixedHex(allocator, out, codepoint, 4);
     } else {
-        try out.appendSlice(allocator, "\\U");
+        try out.*.appendSlice(allocator, "\\U");
         try tag_emit.appendFixedHex(allocator, out, codepoint, 8);
     }
 }

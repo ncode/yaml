@@ -18,86 +18,86 @@ const appendEmittedAlias = scalar_emit.appendEmittedAlias;
 const appendEmittedCollectionProperties = scalar_emit.appendEmittedCollectionProperties;
 const appendEmittedScalarNode = scalar_emit.appendEmittedScalarNode;
 
-pub fn emitFlowSequence(self: *State, out: *std.ArrayList(u8)) Error!void {
+pub fn emitFlowSequence(self: *State, out: anytype) Error!void {
     try self.enterEmitCollection();
     defer self.leaveEmitCollection();
 
-    try out.append(self.allocator, '[');
+    try out.*.append(self.allocator, '[');
 
     var first_item = true;
     while (self.index < self.events.len and self.events[self.index] != .sequence_end) {
-        if (!first_item) try out.appendSlice(self.allocator, ", ");
+        if (!first_item) try out.*.appendSlice(self.allocator, ", ");
         first_item = false;
 
         try emitFlowNode(self, out);
     }
 
     if (self.index >= self.events.len) return ParseError.InvalidSyntax;
-    try out.append(self.allocator, ']');
+    try out.*.append(self.allocator, ']');
     self.index += 1;
 }
 
 pub fn emitEmptySequenceIfPresent(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     collection: CollectionStart,
     prefix: ?[]const u8,
 ) Error!bool {
     if (self.index >= self.events.len) return ParseError.InvalidSyntax;
     if (self.events[self.index] != .sequence_end) return false;
 
-    if (prefix) |value| try out.appendSlice(self.allocator, value);
+    if (prefix) |value| try out.*.appendSlice(self.allocator, value);
     if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-        try out.append(self.allocator, ' ');
+        try out.*.append(self.allocator, ' ');
     }
-    try out.appendSlice(self.allocator, "[]");
+    try out.*.appendSlice(self.allocator, "[]");
     self.index += 1;
     return true;
 }
 
 pub fn emitEmptyMappingIfPresent(
     self: *State,
-    out: *std.ArrayList(u8),
+    out: anytype,
     collection: CollectionStart,
     prefix: ?[]const u8,
 ) Error!bool {
     if (self.index >= self.events.len) return ParseError.InvalidSyntax;
     if (self.events[self.index] != .mapping_end) return false;
 
-    if (prefix) |value| try out.appendSlice(self.allocator, value);
+    if (prefix) |value| try out.*.appendSlice(self.allocator, value);
     if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-        try out.append(self.allocator, ' ');
+        try out.*.append(self.allocator, ' ');
     }
-    try out.appendSlice(self.allocator, "{}");
+    try out.*.appendSlice(self.allocator, "{}");
     self.index += 1;
     return true;
 }
 
-pub fn emitFlowMapping(self: *State, out: *std.ArrayList(u8)) Error!void {
+pub fn emitFlowMapping(self: *State, out: anytype) Error!void {
     try self.enterEmitCollection();
     defer self.leaveEmitCollection();
 
-    try out.append(self.allocator, '{');
+    try out.*.append(self.allocator, '{');
 
     var first_pair = true;
     while (self.index < self.events.len and self.events[self.index] != .mapping_end) {
-        if (!first_pair) try out.appendSlice(self.allocator, ", ");
+        if (!first_pair) try out.*.appendSlice(self.allocator, ", ");
         first_pair = false;
 
         try emitFlowNode(self, out);
         if (self.index >= self.events.len or self.events[self.index] == .mapping_end) {
             return ParseError.InvalidSyntax;
         }
-        try out.appendSlice(self.allocator, ": ");
+        try out.*.appendSlice(self.allocator, ": ");
         try emitFlowNode(self, out);
     }
 
     if (self.index >= self.events.len) return ParseError.InvalidSyntax;
-    try out.append(self.allocator, '}');
+    try out.*.append(self.allocator, '}');
     self.index += 1;
 }
 
-pub fn emitFlowNode(self: *State, out: *std.ArrayList(u8)) Error!void {
+pub fn emitFlowNode(self: *State, out: anytype) Error!void {
     if (self.index >= self.events.len) return ParseError.InvalidSyntax;
 
     switch (self.events[self.index]) {
@@ -113,7 +113,7 @@ pub fn emitFlowNode(self: *State, out: *std.ArrayList(u8)) Error!void {
             self.index += 1;
             if (try emitEmptySequenceIfPresent(self, out, collection, null)) return;
             if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-                try out.append(self.allocator, ' ');
+                try out.*.append(self.allocator, ' ');
             }
             try emitFlowSequence(self, out);
         },
@@ -121,7 +121,7 @@ pub fn emitFlowNode(self: *State, out: *std.ArrayList(u8)) Error!void {
             self.index += 1;
             if (try emitEmptyMappingIfPresent(self, out, collection, null)) return;
             if (try appendEmittedCollectionProperties(self.allocator, out, collection)) {
-                try out.append(self.allocator, ' ');
+                try out.*.append(self.allocator, ' ');
             }
             try emitFlowMapping(self, out);
         },
